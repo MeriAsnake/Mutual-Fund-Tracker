@@ -59,21 +59,116 @@ const PALETTE = ["#05D48A","#4B9EFF","#F5A524","#C97EFF","#FF6F91","#00C9E0","#F
 const col = i => PALETTE[i % PALETTE.length];
 
 // ── Storage ───────────────────────────────────────────────────────────────────
-const KEY     = "mf-tracker-v5";
-const KEY_THM = "mf-tracker-theme";
-async function loadStorage() {
-  try { const r = await window.storage.get(KEY); return r ? JSON.parse(r.value) : null; }
-  catch { return null; }
-}
+const KEY        = "mf-tracker-v5";
+const KEY_MANUAL = "mf-tracker-manual";   // picks added directly in dashboard
+const KEY_THM    = "mf-tracker-theme";
+
+// 🔗 REPLACE THIS URL with your Google Apps Script deployment URL
+const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbwa3uu1XSRhQrXj9c4lJgHwZMct3rlzoejPUD9xF-4cA0z6RYX8c1xpFVXOtNJQIe0/exec";
+
+// Save/load price cache (applies to ALL picks regardless of source)
 async function saveStorage(data) {
-  try { await window.storage.set(KEY, JSON.stringify(data)); } catch {}
+  try { localStorage.setItem(KEY, JSON.stringify(data)); } catch {}
 }
+async function loadPriceCache() {
+  try { const v = localStorage.getItem(KEY); return v ? JSON.parse(v) : []; }
+  catch { return []; }
+}
+
+// Save/load manually-added picks (added via "+ Add Pick" button)
+async function saveManualPicks(picks) {
+  try { localStorage.setItem(KEY_MANUAL, JSON.stringify(picks)); } catch {}
+}
+async function loadManualPicks() {
+  try { const v = localStorage.getItem(KEY_MANUAL); return v ? JSON.parse(v) : []; }
+  catch { return []; }
+}
+
+// Fetch picks from Google Sheet
+async function fetchSheetPicks() {
+  if (!SHEET_API_URL || SHEET_API_URL === "https://script.google.com/macros/s/AKfycbwa3uu1XSRhQrXj9c4lJgHwZMct3rlzoejPUD9xF-4cA0z6RYX8c1xpFVXOtNJQIe0/execE") return [];
+  const res = await fetch(SHEET_API_URL);
+  if (!res.ok) throw new Error(`Sheet responded ${res.status}`);
+  const json = await res.json();
+
+  console.log("📊 Raw sheet response:", JSON.stringify(json).slice(0, 500));
+
+  const rows = Array.isArray(json.picks) ? json.picks : [];
+  console.log(`📋 Got ${rows.length} rows. First row keys:`, rows[0] ? Object.keys(rows[0]) : "none");
+
+  // Helper: safely convert any date value to YYYY-MM-DD
+  const toDateStr = (val) => {
+    if (!val) return "";
+    if (typeof val === "string" && /^\d{4}-\d{2}-\d{2}/.test(val)) return val.slice(0, 10);
+    if (typeof val === "string") {
+      const d = new Date(val);
+      if (!isNaN(d)) return d.toISOString().slice(0, 10);
+    }
+    if (typeof val === "number") {
+      const d = new Date((val - 25569) * 86400 * 1000);
+      if (!isNaN(d)) return d.toISOString().slice(0, 10);
+    }
+    return String(val).slice(0, 10);
+  };
+
+  return rows
+    .filter(sp => sp["Fund Symbol"] || sp["symbol"])
+    .map(sp => {
+      // Match YOUR exact column names: Timestamp, Fund Symbol, Company Name, Pick Date, Expected %
+      const symbol      = String(sp["Fund Symbol"] || sp["symbol"] || "").toUpperCase().trim();
+      const company     = String(sp["Company Name"] || sp["company"] || "").trim();
+      const pickedDate  = toDateStr(sp["Pick Date"] || sp["pickedDate"] || sp["date"] || "");
+      const expectedPct = parseFloat(String(sp["Expected %"] || sp["expectedPct"] || "0").replace("%", "")) || 0;
+
+      console.log(`  → symbol="${symbol}" company="${company}" date="${pickedDate}" exp="${expectedPct}"`);
+
+      return { id: `sheet-${symbol}-${pickedDate}`, symbol, company, pickedDate, expectedPct, _source: "sheet" };
+    })
+    .filter(p => {
+      const ok = p.symbol && p.pickedDate && p.pickedDate.length === 10;
+      if (!ok) console.warn(`  ✗ Filtered out invalid pick:`, p);
+      return ok;
+    });
+}
+
+// Merge all picks: sheet picks + manual picks, apply cached price data on top
+function mergePicks(sheetPicks, manualPicks, priceCache) {
+  const all = [...sheetPicks];
+  // Add manual picks that don't already exist in sheet
+  manualPicks.forEach(mp => {
+    const exists = all.some(p => p.symbol === mp.symbol && p.pickedDate === mp.pickedDate);
+    if (!exists) all.push({ ...mp, _source: "manual" });
+  });
+  // Apply cached price data (prices, priceSource, priceNote, lastFetched)
+  return all.map(pick => {
+    const cached = priceCache.find(c => c.id === pick.id || (c.symbol === pick.symbol && c.pickedDate === pick.pickedDate));
+    if (!cached) return pick;
+    return { ...pick, prices: cached.prices, priceSource: cached.priceSource, priceNote: cached.priceNote, lastFetched: cached.lastFetched, _fetching: cached._fetching };
+  });
+}
+
+// Initial load: get everything
+async function loadStorage() {
+  try {
+    const [priceCache, manualPicks, thm] = await Promise.all([
+      loadPriceCache(), loadManualPicks(),
+      localStorage.getItem(KEY_THM) || "dark",
+    ]);
+    let sheetPicks = [];
+    try { sheetPicks = await fetchSheetPicks(); } catch {}
+    return mergePicks(sheetPicks, manualPicks, priceCache);
+  } catch {
+    try { const v = localStorage.getItem(KEY); return v ? JSON.parse(v) : []; }
+    catch { return []; }
+  }
+}
+
 async function loadTheme() {
-  try { const r = await window.storage.get(KEY_THM); return r ? r.value : "dark"; }
+  try { return localStorage.getItem(KEY_THM) || "dark"; }
   catch { return "dark"; }
 }
 async function saveTheme(val) {
-  try { await window.storage.set(KEY_THM, val); } catch {}
+  try { localStorage.setItem(KEY_THM, val); } catch {}
 }
 
 // ── Demo data ─────────────────────────────────────────────────────────────────
@@ -639,7 +734,10 @@ function FundCard({ pick, colorIdx, onClick, onFetch }) {
       {isFetching && <div style={{ position:"absolute", top:6, right:8, fontSize:9, color:T.amber, fontFamily:"'DM Mono',monospace", animation:"blink 1s infinite" }}>⟳ fetching…</div>}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
         <div style={{ flex:1, minWidth:0, marginRight:8 }}>
-          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:14, fontWeight:600, color, marginBottom:3 }}>{pick.symbol}</div>
+          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:14, fontWeight:600, color, marginBottom:3, display:"flex", alignItems:"center", gap:6 }}>
+            {pick.symbol}
+            <span style={{ fontSize:8, padding:"1px 6px", borderRadius:3, border:`1px solid ${pick._source==="sheet"?T.blue+"50":T.muted+"40"}`, color:pick._source==="sheet"?T.blue:T.muted, fontWeight:400 }}>{pick._source==="sheet"?"SHEET":"MANUAL"}</span>
+          </div>
           <div style={{ fontSize:11, color:T.muted, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{pick.company}</div>
         </div>
         {current !== null ? <Pct v={current} size={12} /> : <span style={{ fontSize:11, color:T.muted, fontFamily:"'DM Mono',monospace" }}>—</span>}
@@ -825,20 +923,24 @@ function TrackingTable({ picks, onRowClick }) {
 
 // ── Root App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [picks, setPicks]       = useState(null);
-  const [showAdd, setShowAdd]   = useState(false);
-  const [detail, setDetail]     = useState(null);
-  const [cardFilter, setFilter] = useState("all");
-  const [ready, setReady]       = useState(false);
-  const [saved, setSaved]       = useState(false);
-  const [exporting, setExp]     = useState(false);
-  const [isDark, setIsDark]     = useState(true);
+  const [picks, setPicks]         = useState(null);
+  const [manualPicks, setManual]  = useState([]);
+  const [showAdd, setShowAdd]     = useState(false);
+  const [detail, setDetail]       = useState(null);
+  const [cardFilter, setFilter]   = useState("all");
+  const [ready, setReady]         = useState(false);
+  const [saved, setSaved]         = useState(false);
+  const [exporting, setExp]       = useState(false);
+  const [isDark, setIsDark]       = useState(true);
+  const [syncing, setSyncing]     = useState(false);
+  const [syncMsg, setSyncMsg]     = useState("");
 
   const T = isDark ? DARK : LIGHT;
 
   useEffect(() => {
-    Promise.all([loadStorage(), loadTheme()]).then(([stored, thm]) => {
-      setPicks(stored ?? makeDemoData());
+    Promise.all([loadStorage(), loadTheme(), loadManualPicks()]).then(([stored, thm, manual]) => {
+      setPicks(stored ?? []);
+      setManual(manual ?? []);
       setIsDark(thm !== "light");
       setTimeout(() => setReady(true), 60);
     });
@@ -850,20 +952,50 @@ export default function App() {
     saveTheme(next ? "dark" : "light");
   };
 
-  const persist = useCallback(async p => {
-    await saveStorage(p);
+  // Persist price cache (all picks with their price data)
+  const persist = useCallback(async (updatedPicks) => {
+    await saveStorage(updatedPicks);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   }, []);
 
+  // Sync from Google Sheet — merges sheet picks with existing manual picks & price cache
+  const syncFromSheet = async () => {
+    setSyncing(true);
+    setSyncMsg("");
+    try {
+      if (!SHEET_API_URL || SHEET_API_URL === "YOUR_GOOGLE_APPS_SCRIPT_URL_HERE") {
+        setSyncMsg("⚠ No Sheet URL set — edit SHEET_API_URL in the code");
+        return;
+      }
+      const [sheetPicks, priceCache, manual] = await Promise.all([
+        fetchSheetPicks(), loadPriceCache(), loadManualPicks(),
+      ]);
+      const merged = mergePicks(sheetPicks, manual, priceCache);
+      setPicks(merged);
+      setSyncMsg(`✓ Synced ${sheetPicks.length} picks from Sheet`);
+      setTimeout(() => setSyncMsg(""), 3000);
+    } catch(e) {
+      setSyncMsg(`✗ Sync failed: ${e.message}`);
+      setTimeout(() => setSyncMsg(""), 5000);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // Add pick manually via dashboard — saved to localStorage manual picks
   const addPick = async (p) => {
     const withFlag = { ...p, _fetching: true };
-    // Use functional update to avoid stale closure
+    const newManual = [withFlag, ...manualPicks];
+    setManual(newManual);
+    await saveManualPicks(newManual);
     setPicks(prev => [withFlag, ...prev]);
     setShowAdd(false);
-    // Fetch real prices in background
     try {
       const updated = await refreshPickPrices(withFlag);
+      const updatedManual = newManual.map(x => x.id === withFlag.id ? updated : x);
+      setManual(updatedManual);
+      await saveManualPicks(updatedManual);
       setPicks(prev => {
         const next = prev.map(x => x.id === withFlag.id ? updated : x);
         persist(next);
@@ -871,6 +1003,9 @@ export default function App() {
       });
     } catch(e) {
       const fallback = { ...p, _fetching: false, priceNote: "Fetch failed: " + e.message };
+      const updatedManual = newManual.map(x => x.id === p.id ? fallback : x);
+      setManual(updatedManual);
+      await saveManualPicks(updatedManual);
       setPicks(prev => {
         const next = prev.map(x => x.id === p.id ? fallback : x);
         persist(next);
@@ -879,7 +1014,15 @@ export default function App() {
     }
   };
 
-  const removePick = id => { const u=picks.filter(p=>p.id!==id); setPicks(u); persist(u); };
+  // Remove pick — only removes from manual picks (sheet picks stay in sheet)
+  const removePick = async (id) => {
+    const updatedManual = manualPicks.filter(p => p.id !== id);
+    setManual(updatedManual);
+    await saveManualPicks(updatedManual);
+    const next = picks.filter(p => p.id !== id);
+    setPicks(next);
+    persist(next);
+  };
 
   const refreshAllPrices = async () => {
     if (!picks.length) return;
@@ -952,6 +1095,7 @@ export default function App() {
                 <div style={{ width:7, height:7, borderRadius:"50%", background:T.green, boxShadow:`0 0 10px ${T.green}`, animation:"blink 2s infinite" }} />
                 <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:T.green, letterSpacing:"0.18em" }}>MF PICK TRACKER</span>
                 {saved && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:T.muted }}>· ✓ saved</span>}
+                {syncMsg && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:syncMsg.startsWith("✓")?T.green:syncMsg.startsWith("⚠")?T.amber:T.red }}>{syncMsg}</span>}
               </div>
               <h1 style={{ fontFamily:"'Syne',sans-serif", fontSize:"clamp(24px,3.5vw,38px)", fontWeight:800, margin:0, letterSpacing:"-0.025em", color:T.text }}>
                 Fund <span style={{ color:T.green }}>Performance</span>
@@ -962,6 +1106,11 @@ export default function App() {
             </div>
             <div style={{ display:"flex", gap:10, flexWrap:"wrap", justifyContent:"flex-end", alignItems:"center" }}>
               <ThemeToggle isDark={isDark} onToggle={toggleTheme} />
+              <button onClick={syncFromSheet} disabled={syncing}
+                style={{ padding:"11px 18px", background:"transparent", border:`1px solid ${T.green}50`, borderRadius:11, color:T.green, cursor:syncing?"wait":"pointer", fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize:12, display:"flex", alignItems:"center", gap:7, opacity:syncing?0.6:1, transition:"all 0.2s" }}
+                onMouseEnter={e=>e.currentTarget.style.background=T.green+"18"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+              >{syncing?"⟳ Syncing…":"⬆ Sync Sheet"}</button>
               {picks.length > 0 && (
                 <button onClick={refreshAllPrices}
                   style={{ padding:"11px 18px", background:"transparent", border:`1px solid ${T.blue}50`, borderRadius:11, color:T.blue, cursor:"pointer", fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize:12, display:"flex", alignItems:"center", gap:7, transition:"all 0.2s" }}
