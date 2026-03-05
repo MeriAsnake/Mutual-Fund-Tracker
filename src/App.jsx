@@ -753,8 +753,7 @@ function DetailModal({ pick, colorIdx, onClose, onRemove }) {
               <div key={i} style={{ background:reached?(pos?T.green+"12":T.red+"12"):T.surface, border:`1px solid ${reached?(pos?T.green+"35":T.red+"35"):T.border}`, borderRadius:8, padding:"10px 6px", textAlign:"center", opacity:reached?1:0.4 }}>
                 <div style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace", marginBottom:2 }}>{d.label}</div>
                 {tradingDate && <div style={{ fontSize:8, color:T.muted, fontFamily:"'DM Mono',monospace", marginBottom:4, opacity:0.7 }}>{tradingDate.slice(5)}</div>}
-                <div style={{ fontSize:11, fontFamily:"'DM Mono',monospace", fontWeight:600, color:pos?T.green:T.red }}>{reached?`${d.cum>=0?"+":""}${d.cum.toFixed(2)}%`:"–"}</div>
-                {i>0&&reached&&<div style={{ fontSize:9, color:T.muted, marginTop:3, fontFamily:"'DM Mono',monospace" }}>{d.daily>=0?"▲":"▼"}{Math.abs(d.daily).toFixed(2)}</div>}
+                {i>0&&reached&&<div style={{ fontSize:10, fontFamily:"'DM Mono',monospace", fontWeight:700, color:d.daily>=0?T.green:T.red, marginTop:4 }}>{d.daily>=0?"▲":"▼"}{Math.abs(d.daily).toFixed(2)}%</div>}
               </div>
             );
           })}
