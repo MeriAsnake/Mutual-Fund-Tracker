@@ -81,35 +81,262 @@ function makeDemoData() {
   return [];
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function seedRand(str, salt) {
-  let h = salt * 2654435761;
-  for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
-  return ((h >>> 0) % 10000) / 10000;
+// ── US Market Calendar ────────────────────────────────────────────────────────
+// Generates NYSE/NASDAQ holidays for a given year
+function getMarketHolidays(year) {
+  const holidays = new Set();
+  const fmt = d => d.toISOString().slice(0,10);
+
+  // Helper: nth weekday of month (1=Mon..7=Sun)
+  const nthWeekday = (y, m, weekday, n) => {
+    const jsDay = weekday % 7; // Mon=1->1, Fri=5->5, Sun=7->0
+    const d = new Date(y, m - 1, 1);
+    let count = 0;
+    while (true) {
+      if (d.getDay() === jsDay) { count++; if (count === n) return new Date(d); }
+      d.setDate(d.getDate() + 1);
+    }
+  };
+  // Helper: last weekday of month
+  const lastWeekday = (y, m, weekday) => {
+    const jsDay = weekday % 7;
+    const d = new Date(y, m, 0); // last day of month
+    while (d.getDay() !== jsDay) d.setDate(d.getDate() - 1);
+    return new Date(d);
+  };
+  // Helper: observe holiday (if Sat->Fri, if Sun->Mon)
+  const observe = d => {
+    const day = d.getDay();
+    if (day === 6) { d.setDate(d.getDate() - 1); }
+    else if (day === 0) { d.setDate(d.getDate() + 1); }
+    return d;
+  };
+
+  // New Year's Day: Jan 1 (observed)
+  holidays.add(fmt(observe(new Date(year, 0, 1))));
+  // MLK Day: 3rd Monday of January
+  holidays.add(fmt(nthWeekday(year, 1, 1, 3)));
+  // Presidents' Day: 3rd Monday of February
+  holidays.add(fmt(nthWeekday(year, 2, 1, 3)));
+  // Good Friday: Easter - 2 days
+  const easter = getEaster(year);
+  const goodFriday = new Date(easter); goodFriday.setDate(easter.getDate() - 2);
+  holidays.add(fmt(goodFriday));
+  // Memorial Day: last Monday of May
+  holidays.add(fmt(lastWeekday(year, 5, 1)));
+  // Juneteenth: June 19 (observed) — from 2022
+  if (year >= 2022) holidays.add(fmt(observe(new Date(year, 5, 19))));
+  // Independence Day: July 4 (observed)
+  holidays.add(fmt(observe(new Date(year, 6, 4))));
+  // Labor Day: 1st Monday of September
+  holidays.add(fmt(nthWeekday(year, 9, 1, 1)));
+  // Thanksgiving: 4th Thursday of November
+  holidays.add(fmt(nthWeekday(year, 11, 4, 4)));
+  // Christmas: Dec 25 (observed)
+  holidays.add(fmt(observe(new Date(year, 11, 25))));
+
+  return holidays;
 }
-function getDayData(ticker, expectedPct, numDays = 5) {
-  const targetDaily = expectedPct / numDays;
+
+// Anonymous Gregorian Easter algorithm
+function getEaster(year) {
+  const a = year % 19, b = Math.floor(year/100), c = year % 100;
+  const d = Math.floor(b/4), e = b % 4, f = Math.floor((b+8)/25);
+  const g = Math.floor((b-f+1)/3), h = (19*a+b-d-g+15) % 30;
+  const i = Math.floor(c/4), k = c % 4;
+  const l = (32+2*e+2*i-h-k) % 7;
+  const m = Math.floor((a+11*h+22*l)/451);
+  const month = Math.floor((h+l-7*m+114)/31);
+  const day = ((h+l-7*m+114) % 31) + 1;
+  return new Date(year, month-1, day);
+}
+
+// Cache holidays by year
+const _holidayCache = {};
+function isMarketHoliday(dateStr) {
+  const year = parseInt(dateStr.slice(0,4));
+  if (!_holidayCache[year]) _holidayCache[year] = getMarketHolidays(year);
+  return _holidayCache[year].has(dateStr);
+}
+
+function isMarketOpen(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  const dow = d.getDay();
+  if (dow === 0 || dow === 6) return false; // weekend
+  return !isMarketHoliday(dateStr);
+}
+
+// Add N trading days to a date string
+function addTradingDays(dateStr, n) {
+  const d = new Date(dateStr + "T12:00:00");
+  let count = 0;
+  while (count < n) {
+    d.setDate(d.getDate() + 1);
+    const s = d.toISOString().slice(0,10);
+    if (isMarketOpen(s)) count++;
+  }
+  return d.toISOString().slice(0,10);
+}
+
+// Count trading days elapsed from pickedDate up to today (max 5)
+function tradingDaysSince(dateStr) {
+  const start = new Date(dateStr + "T12:00:00");
+  const today = new Date();
+  today.setHours(12,0,0,0);
+  if (today <= start) return 0;
+  let count = 0;
+  const cur = new Date(start);
+  while (true) {
+    cur.setDate(cur.getDate() + 1);
+    if (cur > today) break;
+    const s = cur.toISOString().slice(0,10);
+    if (isMarketOpen(s)) count++;
+    if (count >= 5) break;
+  }
+  return count;
+}
+
+// Get the actual calendar date of trading day N after pickedDate
+// Returns array of {tradingDay, date} for days 1-5
+function getTradingDayDates(dateStr) {
+  const result = [];
+  let cur = dateStr;
+  for (let i = 1; i <= 5; i++) {
+    cur = addTradingDays(cur, 1);
+    result.push({ tradingDay: i, date: cur });
+  }
+  return result;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function todayStr() { return new Date().toISOString().slice(0,10); }
+function fmtDate(s) { return new Date(s + "T12:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); }
+
+// Build chart points from real NAV prices stored on pick
+// pick.prices = { baseNav, d1, d2, d3, d4, d5 }
+function buildDayData(pick) {
+  const p = pick.prices || {};
+  const base = p.baseNav;
   const pts = [{ day:0, label:"Day 0", cum:0, daily:0 }];
-  let cum = 0;
-  for (let d = 1; d <= numDays; d++) {
-    const noise = (seedRand(ticker, d*7+13) - 0.5) * 2 * Math.abs(targetDaily) * 1.8;
-    const pull  = (expectedPct - cum) * 0.25;
-    const daily = +(targetDaily + noise + pull * 0.1).toFixed(3);
-    cum = +(cum + daily).toFixed(3);
+  if (!base) return pts;
+  for (let d = 1; d <= 5; d++) {
+    const nav = p[`d${d}`];
+    if (nav == null) break;
+    const cum = +((nav - base) / base * 100).toFixed(3);
+    const prev = d === 1 ? base : (p[`d${d-1}`] ?? base);
+    const daily = +((nav - prev) / prev * 100).toFixed(3);
     pts.push({ day:d, label:`Day ${d}`, cum, daily });
   }
   return pts;
 }
-function daysSince(dateStr) { return Math.max(0, Math.floor((Date.now() - new Date(dateStr)) / 86400000)); }
-function addDays(dateStr, n) { const d = new Date(dateStr); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
-function todayStr() { return new Date().toISOString().slice(0,10); }
-function fmtDate(s) { return new Date(s).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); }
+
+function getCurrentPct(pick) {
+  const data = buildDayData(pick);
+  return data[data.length - 1]?.cum ?? null;
+}
+
 function calcHitTarget(pick) {
-  if (daysSince(pick.pickedDate) < 5) return null;
-  const final = getDayData(pick.symbol, pick.expectedPct)[5].cum;
+  const elapsed = tradingDaysSince(pick.pickedDate);
+  if (elapsed < 5) return null;
+  const data = buildDayData(pick);
+  if (data.length < 6) return null;
+  const final = data[5].cum;
   if (pick.expectedPct > 0) return final > 0;
   if (pick.expectedPct < 0) return final < 0;
   return Math.abs(final) < 0.5;
+}
+
+// ── Real Price Fetching via Yahoo Finance (same data as Google Finance) ────────
+// Uses corsproxy.io to bypass CORS. Yahoo Finance /v8/finance/chart is free, no key needed.
+// Google Finance's old CSV endpoint (/finance/historical?output=csv) was shut down — returns HTML now.
+
+async function fetchPriceHistory(symbol, fromDate, toDate) {
+  const p1 = Math.floor(new Date(fromDate + "T00:00:00Z").getTime() / 1000);
+  const p2 = Math.floor(new Date(toDate   + "T23:59:59Z").getTime() / 1000);
+
+  // Try two proxies in case one is down
+  const proxies = [
+    `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${p1}&period2=${p2}`)}`,
+    `https://api.allorigins.win/get?url=${encodeURIComponent(`https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${p1}&period2=${p2}`)}`,
+  ];
+
+  let lastErr = "";
+  for (const url of proxies) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) { lastErr = `HTTP ${res.status}`; continue; }
+      const raw = await res.json();
+
+      // allorigins wraps in { contents: "..." }, corsproxy returns JSON directly
+      const json = raw.contents ? JSON.parse(raw.contents) : raw;
+      const result = json?.chart?.result?.[0];
+      if (!result) {
+        const msg = json?.chart?.error?.description || "Symbol not found";
+        lastErr = msg; continue;
+      }
+
+      const timestamps = result.timestamp || [];
+      const closes = result.indicators?.quote?.[0]?.close || [];
+      const priceMap = {};
+      timestamps.forEach((ts, i) => {
+        if (closes[i] == null) return;
+        // Convert unix timestamp to YYYY-MM-DD in ET (UTC-5)
+        const d = new Date((ts + 5 * 3600) * 1000);
+        const key = d.toISOString().slice(0, 10);
+        priceMap[key] = +closes[i].toFixed(4);
+      });
+      return priceMap;
+    } catch (e) { lastErr = e.message; }
+  }
+  throw new Error(`All proxies failed for "${symbol}": ${lastErr}`);
+}
+
+async function fetchRealPrices(symbol, pickedDate) {
+  const tradingDates = [pickedDate];
+  for (let i = 1; i <= 5; i++) tradingDates.push(addTradingDays(pickedDate, i));
+  const today = todayStr();
+  const neededDates = tradingDates.filter(d => d <= today);
+
+  // Fetch all dates in one request — window from D0 to D5
+  const priceMap = await fetchPriceHistory(symbol, neededDates[0], neededDates[neededDates.length - 1]);
+
+  // Find price on or nearest to a target date (within ±2 trading days)
+  function findPrice(dateStr) {
+    if (priceMap[dateStr]) return priceMap[dateStr];
+    // Look back up to 2 days (handles early closes, data delays)
+    for (let i = 1; i <= 2; i++) {
+      const d = new Date(dateStr + "T12:00:00");
+      d.setDate(d.getDate() - i);
+      const k = d.toISOString().slice(0, 10);
+      if (priceMap[k]) return priceMap[k];
+    }
+    return null;
+  }
+
+  const prices = {
+    baseNav: findPrice(neededDates[0]),
+    d1: neededDates[1] ? findPrice(neededDates[1]) : null,
+    d2: neededDates[2] ? findPrice(neededDates[2]) : null,
+    d3: neededDates[3] ? findPrice(neededDates[3]) : null,
+    d4: neededDates[4] ? findPrice(neededDates[4]) : null,
+    d5: neededDates[5] ? findPrice(neededDates[5]) : null,
+  };
+
+  if (prices.baseNav == null) {
+    const available = Object.keys(priceMap).sort().slice(-10).join(", ");
+    throw new Error(`No data for ${symbol} on ${neededDates[0]}. Dates available: [${available || "none"}]. Try checking the ticker on finance.yahoo.com`);
+  }
+
+  return { prices, source: "Yahoo Finance", note: "" };
+}
+
+// Refresh prices for a pick
+async function refreshPickPrices(pick) {
+  const result = await fetchRealPrices(pick.symbol, pick.pickedDate);
+  if (!result.prices || typeof result.prices.baseNav !== "number") {
+    throw new Error(`Bad data: ${JSON.stringify(result)}`);
+  }
+  return { ...pick, _fetching: false, prices: result.prices, priceSource: result.source, priceNote: result.note, lastFetched: todayStr() };
 }
 
 // ── Theme Toggle button ───────────────────────────────────────────────────────
@@ -183,18 +410,20 @@ function loadXLSX() {
 async function exportToExcel(picks) {
   const XLSX = await loadXLSX();
   const wb = XLSX.utils.book_new();
-  const rows = [["Symbol","Company","Picked Date","End Date","Expected %","D1 %","D2 %","D3 %","D4 %","D5 %","Hit Target?"]];
+  const rows = [["Symbol","Company","Picked Date","End Date (T+5)","Expected %","Base NAV","D1 %","D2 %","D3 %","D4 %","D5 %","Hit Target?","Source"]];
   picks.forEach(pick => {
-    const data = getDayData(pick.symbol, pick.expectedPct);
-    const elapsed = daysSince(pick.pickedDate);
+    const data = buildDayData(pick);
     const hit = calcHitTarget(pick);
+    const p = pick.prices || {};
     rows.push([
-      pick.symbol, pick.company, pick.pickedDate, addDays(pick.pickedDate,5),
+      pick.symbol, pick.company, pick.pickedDate, addTradingDays(pick.pickedDate,5),
       pick.expectedPct/100,
-      elapsed>=1?data[1].cum/100:"", elapsed>=2?data[2].cum/100:"",
-      elapsed>=3?data[3].cum/100:"", elapsed>=4?data[4].cum/100:"",
-      elapsed>=5?data[5].cum/100:"",
+      p.baseNav||"",
+      data[1]?data[1].cum/100:"", data[2]?data[2].cum/100:"",
+      data[3]?data[3].cum/100:"", data[4]?data[4].cum/100:"",
+      data[5]?data[5].cum/100:"",
       hit===null?"Pending":hit?"YES":"NO",
+      pick.priceSource||"",
     ]);
   });
   const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -224,6 +453,7 @@ function AddModal({ onAdd, onClose, taken }) {
     if (!c) return setErr("Company name is required");
     if (isNaN(e)) return setErr("Enter a valid expected % (e.g. 4.5 or -2)");
     if (!pickedDate) return setErr("Pick a date");
+    if (!isMarketOpen(pickedDate)) return setErr(`${pickedDate} is not a trading day (weekend or US market holiday). Please pick a market day.`);
     if (taken.some(t => t.symbol === s && t.pickedDate === pickedDate)) return setErr(`${s} is already tracked for ${pickedDate}`);
     onAdd({ id:Date.now(), symbol:s, company:c, expectedPct:e, pickedDate });
   };
@@ -257,6 +487,12 @@ function AddModal({ onAdd, onClose, taken }) {
             <F label="PICKED DATE *">
               <input type="date" value={pickedDate} onChange={e=>{setDate(e.target.value);setErr("");}} style={inp}
                 onFocus={e=>e.target.style.borderColor=T.blue} onBlur={e=>e.target.style.borderColor=T.border} />
+              {pickedDate && !isMarketOpen(pickedDate) && (
+                <div style={{ marginTop:5, fontSize:10, color:T.amber, fontFamily:"'DM Mono',monospace" }}>⚠ Not a trading day</div>
+              )}
+              {pickedDate && isMarketOpen(pickedDate) && (
+                <div style={{ marginTop:5, fontSize:10, color:T.green, fontFamily:"'DM Mono',monospace" }}>✓ Market open</div>
+              )}
             </F>
           </div>
           <F label="COMPANY / FUND NAME *">
@@ -272,7 +508,7 @@ function AddModal({ onAdd, onClose, taken }) {
         {hasExp && (
           <div style={{ marginTop:14, padding:"10px 14px", borderRadius:9, background:expVal>=0?T.green+"15":T.red+"15", border:`1px solid ${expVal>=0?T.green:T.red}30`, display:"flex", alignItems:"center", gap:10 }}>
             <span style={{ fontSize:18 }}>{expVal>=0?"📈":"📉"}</span>
-            <span style={{ fontSize:12, color:T.muted }}>Expecting <span style={{ color:expVal>=0?T.green:T.red, fontWeight:600 }}>{expVal>=0?"+":""}{expVal}%</span> · End: <b style={{ color:T.text }}>{pickedDate?addDays(pickedDate,5):"—"}</b></span>
+            <span style={{ fontSize:12, color:T.muted }}>Expecting <span style={{ color:expVal>=0?T.green:T.red, fontWeight:600 }}>{expVal>=0?"+":""}{expVal}%</span> · End: <b style={{ color:T.text }}>{pickedDate?addTradingDays(pickedDate,5):"—"}</b></span>
           </div>
         )}
         <div style={{ display:"flex", gap:10, marginTop:22 }}>
@@ -288,13 +524,14 @@ function AddModal({ onAdd, onClose, taken }) {
 function DetailModal({ pick, colorIdx, onClose, onRemove }) {
   const T = useT();
   const color   = col(colorIdx);
-  const elapsed = Math.min(daysSince(pick.pickedDate), 5);
-  const allData = getDayData(pick.symbol, pick.expectedPct);
+  const elapsed = Math.min(tradingDaysSince(pick.pickedDate), 5);
+  const allData = buildDayData(pick);
   const visible = allData.slice(0, elapsed+1);
   const current = visible[visible.length-1]?.cum ?? 0;
   const isComplete = elapsed >= 5;
   const hit     = calcHitTarget(pick);
-  const endDate = addDays(pick.pickedDate, 5);
+  const endDate = addTradingDays(pick.pickedDate, 5);
+  const hasRealPrices = !!(pick.prices?.baseNav);
 
   return (
     <div onClick={e=>e.target===e.currentTarget&&onClose()} style={{ position:"fixed", inset:0, background:"#00000090", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
@@ -344,15 +581,29 @@ function DetailModal({ pick, colorIdx, onClose, onRemove }) {
           {allData.map((d,i) => {
             const reached = i <= elapsed;
             const pos = d.cum >= 0;
+            const tradingDate = i === 0 ? pick.pickedDate : getTradingDayDates(pick.pickedDate)[i-1]?.date;
             return (
               <div key={i} style={{ background:reached?(pos?T.green+"12":T.red+"12"):T.surface, border:`1px solid ${reached?(pos?T.green+"35":T.red+"35"):T.border}`, borderRadius:8, padding:"10px 6px", textAlign:"center", opacity:reached?1:0.4 }}>
-                <div style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace", marginBottom:6 }}>{d.label}</div>
+                <div style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace", marginBottom:2 }}>{d.label}</div>
+                {tradingDate && <div style={{ fontSize:8, color:T.muted, fontFamily:"'DM Mono',monospace", marginBottom:4, opacity:0.7 }}>{tradingDate.slice(5)}</div>}
                 <div style={{ fontSize:11, fontFamily:"'DM Mono',monospace", fontWeight:600, color:pos?T.green:T.red }}>{reached?`${d.cum>=0?"+":""}${d.cum.toFixed(2)}%`:"–"}</div>
                 {i>0&&reached&&<div style={{ fontSize:9, color:T.muted, marginTop:3, fontFamily:"'DM Mono',monospace" }}>{d.daily>=0?"▲":"▼"}{Math.abs(d.daily).toFixed(2)}</div>}
               </div>
             );
           })}
         </div>
+        {(pick.priceSource || pick.priceNote) && (
+          <div style={{ marginBottom:14, padding:"8px 12px", borderRadius:8, background:T.surface, border:`1px solid ${T.border}`, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+            {pick.priceSource && <span style={{ fontSize:10, color:T.green, fontFamily:"'DM Mono',monospace" }}>📡 {pick.priceSource}</span>}
+            {pick.priceNote && <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{pick.priceNote}</span>}
+            {pick.lastFetched && <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace", marginLeft:"auto" }}>Updated {pick.lastFetched}</span>}
+          </div>
+        )}
+        {!hasRealPrices && (
+          <div style={{ marginBottom:14, padding:"10px 14px", borderRadius:8, background:T.amber+"12", border:`1px solid ${T.amber}30` }}>
+            <span style={{ fontSize:11, color:T.amber, fontFamily:"'DM Mono',monospace" }}>⚠ No real price data yet. Use ⟳ Refresh Prices to fetch live NAV data.</span>
+          </div>
+        )}
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <span style={{ fontSize:11, color:T.muted, fontFamily:"'DM Mono',monospace" }}>Picked {pick.pickedDate} · Ends {endDate}</span>
           <button onClick={()=>{onRemove(pick.id);onClose();}} style={{ background:T.red+"15", border:`1px solid ${T.red}30`, color:T.red, borderRadius:8, padding:"7px 16px", cursor:"pointer", fontSize:11, fontFamily:"'DM Mono',monospace" }}>Remove Pick</button>
@@ -363,17 +614,20 @@ function DetailModal({ pick, colorIdx, onClose, onRemove }) {
 }
 
 // ── Fund Card ─────────────────────────────────────────────────────────────────
-function FundCard({ pick, colorIdx, onClick }) {
+function FundCard({ pick, colorIdx, onClick, onFetch }) {
   const T = useT();
   const color   = col(colorIdx);
-  const elapsed = Math.min(daysSince(pick.pickedDate), 5);
-  const data    = getDayData(pick.symbol, pick.expectedPct);
+  const elapsed = Math.min(tradingDaysSince(pick.pickedDate), 5);
+  const data    = buildDayData(pick);
   const visible = data.slice(0, elapsed+1);
-  const current = visible[visible.length-1]?.cum ?? 0;
+  const current = visible[visible.length-1]?.cum ?? null;
   const isComplete = elapsed >= 5;
   const hit     = calcHitTarget(pick);
-  const onTrack = pick.expectedPct > 0 ? current > 0 : pick.expectedPct < 0 ? current < 0 : true;
-  const endDate = addDays(pick.pickedDate, 5);
+  const onTrack = current !== null && (pick.expectedPct > 0 ? current > 0 : pick.expectedPct < 0 ? current < 0 : true);
+  const endDate = addTradingDays(pick.pickedDate, 5);
+  const hasRealPrices = !!(pick.prices?.baseNav);
+  const isFetching = pick._fetching;
+  const fetchError = !hasRealPrices && !isFetching && pick.priceNote;
 
   return (
     <div onClick={onClick}
@@ -382,12 +636,13 @@ function FundCard({ pick, colorIdx, onClick }) {
       onMouseLeave={e=>{ e.currentTarget.style.borderColor=T.border; e.currentTarget.style.transform="none"; e.currentTarget.style.boxShadow=T.isDark?"none":"0 2px 12px rgba(0,0,0,0.06)"; e.currentTarget.style.background=T.surface; }}
     >
       <div style={{ position:"absolute", top:0, left:0, right:0, height:3, background:color, borderRadius:"14px 14px 0 0" }} />
+      {isFetching && <div style={{ position:"absolute", top:6, right:8, fontSize:9, color:T.amber, fontFamily:"'DM Mono',monospace", animation:"blink 1s infinite" }}>⟳ fetching…</div>}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
         <div style={{ flex:1, minWidth:0, marginRight:8 }}>
           <div style={{ fontFamily:"'DM Mono',monospace", fontSize:14, fontWeight:600, color, marginBottom:3 }}>{pick.symbol}</div>
           <div style={{ fontSize:11, color:T.muted, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{pick.company}</div>
         </div>
-        <Pct v={current} size={12} />
+        {current !== null ? <Pct v={current} size={12} /> : <span style={{ fontSize:11, color:T.muted, fontFamily:"'DM Mono',monospace" }}>—</span>}
       </div>
       <div style={{ display:"flex", gap:8, marginBottom:10, alignItems:"center" }}>
         <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace" }}>📅 {pick.pickedDate}</span>
@@ -398,8 +653,23 @@ function FundCard({ pick, colorIdx, onClick }) {
         <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace" }}>Target:</span>
         <Pct v={pick.expectedPct} size={10} />
         <HitBadge hit={hit} />
-        {!isComplete&&elapsed>0&&<Pill color={onTrack?T.green:T.red} filled>{onTrack?"On Track":"Off Track"}</Pill>}
+        {!isComplete&&elapsed>0&&current!==null&&<Pill color={onTrack?T.green:T.red} filled>{onTrack?"On Track":"Off Track"}</Pill>}
       </div>
+      {/* Show fetch error with retry button, or no-data prompt */}
+      {!hasRealPrices && !isFetching && (
+        <div onClick={e=>{ e.stopPropagation(); onFetch(pick); }}
+          style={{ marginBottom:10, padding:"8px 10px", borderRadius:8, background:fetchError?T.red+"12":T.amber+"12", border:`1px solid ${fetchError?T.red+"40":T.amber+"30"}`, cursor:"pointer", display:"flex", alignItems:"flex-start", gap:8 }}
+          title="Click to retry fetch"
+        >
+          <span style={{ fontSize:13, flexShrink:0 }}>{fetchError ? "⚠️" : "📡"}</span>
+          <div>
+            <div style={{ fontSize:10, color:fetchError?T.red:T.amber, fontFamily:"'DM Mono',monospace", fontWeight:600 }}>
+              {fetchError ? "Fetch failed — click to retry" : "No price data — click to fetch"}
+            </div>
+            {fetchError && <div style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace", marginTop:3, wordBreak:"break-word" }}>{String(fetchError).slice(0,120)}</div>}
+          </div>
+        </div>
+      )}
       <ResponsiveContainer width="100%" height={48}>
         <AreaChart data={visible} margin={{ top:2, right:0, left:0, bottom:0 }}>
           <defs>
@@ -459,19 +729,21 @@ function TrackingTable({ picks, onRowClick }) {
   ];
 
   const rows = picks.map(pick => {
-    const data = getDayData(pick.symbol, pick.expectedPct);
-    const elapsed = daysSince(pick.pickedDate);
-    const current = data[Math.min(elapsed,5)].cum;
+    const data = buildDayData(pick);
+    const elapsed = tradingDaysSince(pick.pickedDate);
+    const current = data[Math.min(elapsed, data.length-1)]?.cum ?? null;
     const hit = calcHitTarget(pick);
     const isComplete = elapsed >= 5;
+    const tradingLeft = Math.max(0, 5 - elapsed);
     return {
       pick, symbol:pick.symbol, company:pick.company,
-      pickedDate:pick.pickedDate, endDate:addDays(pick.pickedDate,5),
+      pickedDate:pick.pickedDate, endDate:addTradingDays(pick.pickedDate,5),
       expected:pick.expectedPct, current,
-      d1:elapsed>=1?data[1].cum:null, d2:elapsed>=2?data[2].cum:null,
-      d3:elapsed>=3?data[3].cum:null, d4:elapsed>=4?data[4].cum:null,
-      d5:elapsed>=5?data[5].cum:null,
-      hit, status:isComplete?"Done":`Day ${Math.min(elapsed,5)}`, isComplete, elapsed,
+      d1:data[1]?.cum??null, d2:data[2]?.cum??null,
+      d3:data[3]?.cum??null, d4:data[4]?.cum??null,
+      d5:data[5]?.cum??null,
+      hit, status:isComplete?"Done":`Day ${Math.min(elapsed,5)}`, isComplete, elapsed, tradingLeft,
+      hasRealPrices: !!(pick.prices?.baseNav),
     };
   });
 
@@ -498,7 +770,7 @@ function TrackingTable({ picks, onRowClick }) {
           <h3 style={{ margin:0, fontFamily:"'Syne',sans-serif", fontSize:16, fontWeight:800, color:T.text }}>All Tracked Funds</h3>
           <p style={{ margin:"3px 0 0", fontSize:11, color:T.muted }}>{picks.length} funds · click any row to view details · click column headers to sort</p>
         </div>
-        <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{picks.filter(p=>daysSince(p.pickedDate)>=5).length} completed · {picks.filter(p=>daysSince(p.pickedDate)<5).length} active</span>
+        <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{picks.filter(p=>tradingDaysSince(p.pickedDate)>=5).length} completed · {picks.filter(p=>tradingDaysSince(p.pickedDate)<5).length} active</span>
       </div>
       <div style={{ overflowX:"auto" }}>
         <table style={{ width:"100%", borderCollapse:"collapse", minWidth:960 }}>
@@ -531,11 +803,11 @@ function TrackingTable({ picks, onRowClick }) {
                   <td style={{ padding:"13px 12px" }}>
                     <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
                       <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:row.isComplete?T.muted:T.amber }}>{fmtDate(row.endDate)}</span>
-                      <span style={{ fontSize:9, color:row.isComplete?T.muted:T.amber, fontFamily:"'DM Mono',monospace" }}>{row.isComplete?"Closed":`${5-row.elapsed}d left`}</span>
+                      <span style={{ fontSize:9, color:row.isComplete?T.muted:T.amber, fontFamily:"'DM Mono',monospace" }}>{row.isComplete?"Closed":`${row.tradingLeft} trading day${row.tradingLeft!==1?"s":""} left`}</span>
                     </div>
                   </td>
                   <td style={{ padding:"13px 12px" }}><Pct v={row.expected} size={11} /></td>
-                  <td style={{ padding:"13px 12px" }}><Pct v={row.current} size={11} /></td>
+                  <td style={{ padding:"13px 12px" }}>{row.current !== null ? <Pct v={row.current} size={11} /> : <PctCell v={null} />}</td>
                   {[row.d1,row.d2,row.d3,row.d4,row.d5].map((v,di) => (
                     <td key={di} style={{ padding:"13px 8px" }}><PctCell v={v} /></td>
                   ))}
@@ -584,13 +856,62 @@ export default function App() {
     setTimeout(() => setSaved(false), 2000);
   }, []);
 
-  const addPick   = p  => { const u=[p,...picks]; setPicks(u); persist(u); setShowAdd(false); };
+  const addPick = async (p) => {
+    const withFlag = { ...p, _fetching: true };
+    // Use functional update to avoid stale closure
+    setPicks(prev => [withFlag, ...prev]);
+    setShowAdd(false);
+    // Fetch real prices in background
+    try {
+      const updated = await refreshPickPrices(withFlag);
+      setPicks(prev => {
+        const next = prev.map(x => x.id === withFlag.id ? updated : x);
+        persist(next);
+        return next;
+      });
+    } catch(e) {
+      const fallback = { ...p, _fetching: false, priceNote: "Fetch failed: " + e.message };
+      setPicks(prev => {
+        const next = prev.map(x => x.id === p.id ? fallback : x);
+        persist(next);
+        return next;
+      });
+    }
+  };
+
   const removePick = id => { const u=picks.filter(p=>p.id!==id); setPicks(u); persist(u); };
+
+  const refreshAllPrices = async () => {
+    if (!picks.length) return;
+    // Mark all as fetching
+    setPicks(prev => prev.map(p => ({ ...p, _fetching: true })));
+    // Fetch ALL in parallel
+    const results = await Promise.allSettled(picks.map(p => refreshPickPrices(p)));
+    setPicks(prev => {
+      const next = prev.map((p, i) =>
+        results[i].status === "fulfilled"
+          ? results[i].value
+          : { ...p, _fetching: false, priceNote: results[i].reason?.message || "Refresh failed" }
+      );
+      persist(next);
+      return next;
+    });
+  };
 
   const handleExport = async () => {
     setExp(true);
     try { await exportToExcel(picks); } catch(e) { alert("Export failed: "+e.message); }
     finally { setExp(false); }
+  };
+
+  const fetchSinglePick = async (pick) => {
+    setPicks(prev => prev.map(p => p.id === pick.id ? { ...p, _fetching: true, priceNote: "" } : p));
+    try {
+      const updated = await refreshPickPrices(pick);
+      setPicks(prev => { const next = prev.map(p => p.id === pick.id ? updated : p); persist(next); return next; });
+    } catch(e) {
+      setPicks(prev => { const next = prev.map(p => p.id === pick.id ? { ...p, _fetching: false, priceNote: e.message } : p); persist(next); return next; });
+    }
   };
 
   if (!picks) return (
@@ -602,8 +923,8 @@ export default function App() {
     </ThemeCtx.Provider>
   );
 
-  const active    = picks.filter(p => daysSince(p.pickedDate) < 5);
-  const completed = picks.filter(p => daysSince(p.pickedDate) >= 5);
+  const active    = picks.filter(p => tradingDaysSince(p.pickedDate) < 5);
+  const completed = picks.filter(p => tradingDaysSince(p.pickedDate) >= 5);
   const hitCount  = completed.filter(p => calcHitTarget(p)===true).length;
   const hitRate   = completed.length > 0 ? Math.round((hitCount/completed.length)*100) : null;
   const shownCards = cardFilter==="active" ? active : cardFilter==="completed" ? completed : picks;
@@ -611,7 +932,7 @@ export default function App() {
   const overlayData = active.length > 0
     ? [0,1,2,3,4,5].map(d => {
         const pt = { label: d===0?"D0":`D${d}` };
-        active.forEach(p => { pt[`${p.symbol}_${p.id}`] = getDayData(p.symbol,p.expectedPct)[d]?.cum??null; });
+        active.forEach(p => { const dd = buildDayData(p); pt[`${p.symbol}_${p.id}`] = dd[d]?.cum ?? null; });
         return pt;
       })
     : [];
@@ -642,6 +963,13 @@ export default function App() {
             <div style={{ display:"flex", gap:10, flexWrap:"wrap", justifyContent:"flex-end", alignItems:"center" }}>
               <ThemeToggle isDark={isDark} onToggle={toggleTheme} />
               {picks.length > 0 && (
+                <button onClick={refreshAllPrices}
+                  style={{ padding:"11px 18px", background:"transparent", border:`1px solid ${T.blue}50`, borderRadius:11, color:T.blue, cursor:"pointer", fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize:12, display:"flex", alignItems:"center", gap:7, transition:"all 0.2s" }}
+                  onMouseEnter={e=>e.currentTarget.style.background=T.blue+"18"}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                >⟳ Refresh Prices</button>
+              )}
+              {picks.length > 0 && (
                 <button onClick={handleExport} disabled={exporting}
                   style={{ padding:"11px 18px", background:"transparent", border:`1px solid ${T.amber}50`, borderRadius:11, color:T.amber, cursor:exporting?"wait":"pointer", fontFamily:"'Syne',sans-serif", fontWeight:700, fontSize:12, display:"flex", alignItems:"center", gap:7, opacity:exporting?0.6:1, transition:"all 0.2s" }}
                   onMouseEnter={e=>e.currentTarget.style.background=T.amber+"18"}
@@ -662,7 +990,7 @@ export default function App() {
               { label:"Completed",    v:completed.length, color:T.mutedLight },
               { label:"Hit Rate",     v:hitRate!==null?`${hitRate}%`:"–", color:hitRate!==null?(hitRate>=60?T.green:T.red):T.muted },
               { label:"Hits",         v:hitCount,          color:T.green },
-              { label:"Avg Return",   v:completed.length?(() => { const avg=completed.reduce((s,p)=>s+getDayData(p.symbol,p.expectedPct)[5].cum,0)/completed.length; return <Pct v={avg} size={14} />; })():<span style={{ color:T.muted, fontFamily:"'DM Mono',monospace" }}>–</span> },
+              { label:"Avg Return",   v:(() => { const withPrices = completed.filter(p=>p.prices?.d5!=null); if(!withPrices.length) return <span style={{ color:T.muted, fontFamily:"'DM Mono',monospace" }}>–</span>; const avg=withPrices.reduce((s,p)=>{ const d=buildDayData(p); return s+(d[5]?.cum??0); },0)/withPrices.length; return <Pct v={avg} size={14} />; })() },
             ].map((s,i) => (
               <div key={i} style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:"15px 17px", boxShadow:T.isDark?"none":"0 1px 8px rgba(0,0,0,0.05)", transition:"background 0.3s, border-color 0.3s" }}>
                 <div style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace", letterSpacing:"0.12em", marginBottom:10 }}>{s.label.toUpperCase()}</div>
@@ -693,7 +1021,7 @@ export default function App() {
                   <div key={p.id} style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer" }} onClick={()=>setDetail(p)}>
                     <div style={{ width:12, height:3, borderRadius:2, background:col(picks.indexOf(p)) }} />
                     <span style={{ fontSize:11, fontFamily:"'DM Mono',monospace", color:col(picks.indexOf(p)) }}>{p.symbol}</span>
-                    <span style={{ fontSize:10, color:T.muted }}>{p.pickedDate} · D{daysSince(p.pickedDate)}</span>
+                    <span style={{ fontSize:10, color:T.muted }}>{p.pickedDate} · D{tradingDaysSince(p.pickedDate)}</span>
                   </div>
                 ))}
               </div>
@@ -723,7 +1051,7 @@ export default function App() {
           ) : (
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(255px,1fr))", gap:14, marginBottom:36 }}>
               {shownCards.map(pick => (
-                <FundCard key={pick.id} pick={pick} colorIdx={picks.indexOf(pick)} onClick={()=>setDetail(pick)} />
+                <FundCard key={pick.id} pick={pick} colorIdx={picks.indexOf(pick)} onClick={()=>setDetail(pick)} onFetch={fetchSinglePick} />
               ))}
             </div>
           )}
