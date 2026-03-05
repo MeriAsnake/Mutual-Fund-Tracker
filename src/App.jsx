@@ -87,48 +87,93 @@ async function loadManualPicks() {
 // Fetch picks from Google Sheet
 async function fetchSheetPicks() {
   if (!SHEET_API_URL || SHEET_API_URL === "https://script.google.com/macros/s/AKfycbwa3uu1XSRhQrXj9c4lJgHwZMct3rlzoejPUD9xF-4cA0z6RYX8c1xpFVXOtNJQIe0/execE") return [];
-  const res = await fetch(SHEET_API_URL);
-  if (!res.ok) throw new Error(`Sheet responded ${res.status}`);
-  const json = await res.json();
 
-  console.log("📊 Raw sheet response:", JSON.stringify(json).slice(0, 500));
+  let json;
+  try {
+    // Try own Vercel proxy first (works on deployed Vercel)
+    const proxyUrl = `/api/sheet?url=${encodeURIComponent(SHEET_API_URL)}`;
+    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(15000) });
+    if (res.ok) {
+      const data = await res.json();
+      if (!data.error) { json = data; }
+    }
+  } catch {}
 
-  const rows = Array.isArray(json.picks) ? json.picks : [];
-  console.log(`📋 Got ${rows.length} rows. First row keys:`, rows[0] ? Object.keys(rows[0]) : "none");
+  // Fallback: direct fetch (works locally)
+  if (!json) {
+    try {
+      const res = await fetch(SHEET_API_URL, { signal: AbortSignal.timeout(15000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      json = await res.json();
+    } catch (e) {
+      throw new Error(`Cannot reach sheet: ${e.message}`);
+    }
+  }
 
-  // Helper: safely convert any date value to YYYY-MM-DD
+  console.log("📊 Full sheet response:", json);
+
+  // Handle any response shape — {picks:[...]}, {data:[...]}, {values:[...]}, or bare array
+  let rows = [];
+  if (Array.isArray(json))             rows = json;
+  else if (Array.isArray(json.picks))  rows = json.picks;
+  else if (Array.isArray(json.data))   rows = json.data;
+  else if (Array.isArray(json.values)) rows = json.values;
+  else {
+    // Last resort: find the first array in the response
+    const firstArr = Object.values(json).find(v => Array.isArray(v));
+    if (firstArr) rows = firstArr;
+  }
+
+  console.log(`📋 ${rows.length} rows found. Keys in first row:`, rows[0] ? Object.keys(rows[0]) : "none");
+
+  if (rows.length === 0) {
+    throw new Error(`Sheet returned 0 rows. Raw response: ${JSON.stringify(json).slice(0, 200)}`);
+  }
+
+  // Flexible column matching — tries many variations of your column names
+  const getField = (row, ...names) => {
+    for (const name of names) {
+      // Try exact, lowercase, trimmed
+      for (const key of Object.keys(row)) {
+        if (key.trim().toLowerCase() === name.toLowerCase()) {
+          const val = row[key];
+          if (val !== undefined && val !== null && val !== "") return val;
+        }
+      }
+    }
+    return "";
+  };
+
   const toDateStr = (val) => {
     if (!val) return "";
     if (typeof val === "string" && /^\d{4}-\d{2}-\d{2}/.test(val)) return val.slice(0, 10);
-    if (typeof val === "string") {
-      const d = new Date(val);
-      if (!isNaN(d)) return d.toISOString().slice(0, 10);
-    }
-    if (typeof val === "number") {
-      const d = new Date((val - 25569) * 86400 * 1000);
-      if (!isNaN(d)) return d.toISOString().slice(0, 10);
-    }
+    if (typeof val === "string") { const d = new Date(val); if (!isNaN(d)) return d.toISOString().slice(0, 10); }
+    if (typeof val === "number") { const d = new Date((val - 25569) * 86400 * 1000); if (!isNaN(d)) return d.toISOString().slice(0, 10); }
     return String(val).slice(0, 10);
   };
 
-  return rows
-    .filter(sp => sp["Fund Symbol"] || sp["symbol"])
-    .map(sp => {
-      // Match YOUR exact column names: Timestamp, Fund Symbol, Company Name, Pick Date, Expected %
-      const symbol      = String(sp["Fund Symbol"] || sp["symbol"] || "").toUpperCase().trim();
-      const company     = String(sp["Company Name"] || sp["company"] || "").trim();
-      const pickedDate  = toDateStr(sp["Pick Date"] || sp["pickedDate"] || sp["date"] || "");
-      const expectedPct = parseFloat(String(sp["Expected %"] || sp["expectedPct"] || "0").replace("%", "")) || 0;
+  const picks = rows.map((sp, i) => {
+    const symbol      = String(getField(sp, "Fund Symbol", "symbol", "Symbol", "ticker", "Ticker", "SYMBOL")).toUpperCase().trim();
+    const company     = String(getField(sp, "Company Name", "company", "Company", "Fund Name", "name", "Name")).trim();
+    const pickedDate  = toDateStr(getField(sp, "Pick Date", "pickedDate", "Picked Date", "date", "Date", "pick_date"));
+    const expectedPct = parseFloat(String(getField(sp, "Expected %", "expectedPct", "Expected", "expected", "Target %", "target") || "0").replace("%", "")) || 0;
 
-      console.log(`  → symbol="${symbol}" company="${company}" date="${pickedDate}" exp="${expectedPct}"`);
+    console.log(`  Row ${i+1}: symbol="${symbol}" date="${pickedDate}" exp="${expectedPct}" company="${company}"`);
 
-      return { id: `sheet-${symbol}-${pickedDate}`, symbol, company, pickedDate, expectedPct, _source: "sheet" };
-    })
-    .filter(p => {
-      const ok = p.symbol && p.pickedDate && p.pickedDate.length === 10;
-      if (!ok) console.warn(`  ✗ Filtered out invalid pick:`, p);
-      return ok;
-    });
+    return { id: `sheet-${symbol}-${pickedDate}`, symbol, company, pickedDate, expectedPct, _source: "sheet" };
+  });
+
+  const valid = picks.filter(p => {
+    const ok = p.symbol && p.pickedDate && p.pickedDate.length === 10;
+    if (!ok) console.warn(`  ✗ Skipped row — missing symbol or valid date:`, p);
+    return ok;
+  });
+
+  if (valid.length === 0) {
+    throw new Error(`Got ${rows.length} rows but 0 valid picks. Check column names match: "Fund Symbol", "Company Name", "Pick Date", "Expected %". Raw first row: ${JSON.stringify(rows[0]).slice(0, 200)}`);
+  }
+
+  return valid;
 }
 
 // Merge all picks: sheet picks + manual picks, apply cached price data on top
@@ -341,49 +386,78 @@ function calcHitTarget(pick) {
   return Math.abs(final) < 0.5;
 }
 
-// ── Real Price Fetching via Yahoo Finance (same data as Google Finance) ────────
-// Uses corsproxy.io to bypass CORS. Yahoo Finance /v8/finance/chart is free, no key needed.
-// Google Finance's old CSV endpoint (/finance/historical?output=csv) was shut down — returns HTML now.
+// ── Real Price Fetching ───────────────────────────────────────────────────────
+// Uses /api/prices — a Vercel serverless function in your own project.
+// This runs server-side so there are zero CORS issues, works on Vercel deployed app.
+// Falls back to public proxies if running locally without the API route.
 
 async function fetchPriceHistory(symbol, fromDate, toDate) {
+  const errors = [];
+
+  // ── Strategy 1: Own Vercel proxy (/api/prices) ─────────────────────────────
+  // Works when deployed on Vercel. No CORS, no rate limits, supports mutual funds.
+  try {
+    const url = `/api/prices?symbol=${encodeURIComponent(symbol)}&from=${fromDate}&to=${toDate}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.priceMap && Object.keys(data.priceMap).length > 0) {
+        return data.priceMap;
+      }
+      errors.push(`own-proxy: ${data.error || "empty map"}`);
+    } else {
+      errors.push(`own-proxy: HTTP ${res.status}`);
+    }
+  } catch (e) {
+    errors.push(`own-proxy: ${e.message}`);
+  }
+
+  // ── Strategy 2: corsproxy + Yahoo chart (fallback for local dev) ────────────
   const p1 = Math.floor(new Date(fromDate + "T00:00:00Z").getTime() / 1000);
   const p2 = Math.floor(new Date(toDate   + "T23:59:59Z").getTime() / 1000);
-
-  // Try two proxies in case one is down
-  const proxies = [
-    `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${p1}&period2=${p2}`)}`,
-    `https://api.allorigins.win/get?url=${encodeURIComponent(`https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${p1}&period2=${p2}`)}`,
+  const fallbacks = [
+    { name: "corsproxy+chart",    url: `https://corsproxy.io/?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${p1}&period2=${p2}`)}`, type: "json" },
+    { name: "allorigins+download",url: `https://api.allorigins.win/get?url=${encodeURIComponent(`https://query1.finance.yahoo.com/v7/finance/download/${symbol}?period1=${p1}&period2=${p2}&interval=1d&events=history`)}`, type: "csv" },
   ];
 
-  let lastErr = "";
-  for (const url of proxies) {
+  for (const s of fallbacks) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
-      if (!res.ok) { lastErr = `HTTP ${res.status}`; continue; }
-      const raw = await res.json();
+      const res = await fetch(s.url, { signal: AbortSignal.timeout(20000) });
+      if (!res.ok) { errors.push(`${s.name}: HTTP ${res.status}`); continue; }
 
-      // allorigins wraps in { contents: "..." }, corsproxy returns JSON directly
-      const json = raw.contents ? JSON.parse(raw.contents) : raw;
-      const result = json?.chart?.result?.[0];
-      if (!result) {
-        const msg = json?.chart?.error?.description || "Symbol not found";
-        lastErr = msg; continue;
+      if (s.type === "csv") {
+        const outer = await res.json();
+        const csv   = outer.contents || "";
+        if (!csv || csv.includes("<html")) { errors.push(`${s.name}: got HTML`); continue; }
+        const lines = csv.trim().split("\n").slice(1);
+        const priceMap = {};
+        for (const line of lines) {
+          const cols  = line.split(",");
+          const close = parseFloat(cols[4]);
+          if (cols[0] && !isNaN(close)) priceMap[cols[0].trim()] = +close.toFixed(4);
+        }
+        if (Object.keys(priceMap).length > 0) return priceMap;
+        errors.push(`${s.name}: no rows`); continue;
       }
 
+      const raw    = await res.json();
+      const json   = raw.contents ? JSON.parse(raw.contents) : raw;
+      const result = json?.chart?.result?.[0];
+      if (!result) { errors.push(`${s.name}: ${json?.chart?.error?.description || "no result"}`); continue; }
       const timestamps = result.timestamp || [];
-      const closes = result.indicators?.quote?.[0]?.close || [];
-      const priceMap = {};
+      const closes     = result.indicators?.quote?.[0]?.close || [];
+      const priceMap   = {};
       timestamps.forEach((ts, i) => {
         if (closes[i] == null) return;
-        // Convert unix timestamp to YYYY-MM-DD in ET (UTC-5)
         const d = new Date((ts + 5 * 3600) * 1000);
-        const key = d.toISOString().slice(0, 10);
-        priceMap[key] = +closes[i].toFixed(4);
+        priceMap[d.toISOString().slice(0, 10)] = +closes[i].toFixed(4);
       });
-      return priceMap;
-    } catch (e) { lastErr = e.message; }
+      if (Object.keys(priceMap).length > 0) return priceMap;
+      errors.push(`${s.name}: empty`);
+    } catch (e) { errors.push(`${s.name}: ${e.message}`); }
   }
-  throw new Error(`All proxies failed for "${symbol}": ${lastErr}`);
+
+  throw new Error(`Could not fetch "${symbol}". ${errors.join(" | ")}`);
 }
 
 async function fetchRealPrices(symbol, pickedDate) {
@@ -392,14 +466,12 @@ async function fetchRealPrices(symbol, pickedDate) {
   const today = todayStr();
   const neededDates = tradingDates.filter(d => d <= today);
 
-  // Fetch all dates in one request — window from D0 to D5
   const priceMap = await fetchPriceHistory(symbol, neededDates[0], neededDates[neededDates.length - 1]);
 
-  // Find price on or nearest to a target date (within ±2 trading days)
   function findPrice(dateStr) {
     if (priceMap[dateStr]) return priceMap[dateStr];
-    // Look back up to 2 days (handles early closes, data delays)
-    for (let i = 1; i <= 2; i++) {
+    // Look back up to 3 days — mutual fund NAV often posted next morning
+    for (let i = 1; i <= 3; i++) {
       const d = new Date(dateStr + "T12:00:00");
       d.setDate(d.getDate() - i);
       const k = d.toISOString().slice(0, 10);
@@ -418,8 +490,8 @@ async function fetchRealPrices(symbol, pickedDate) {
   };
 
   if (prices.baseNav == null) {
-    const available = Object.keys(priceMap).sort().slice(-10).join(", ");
-    throw new Error(`No data for ${symbol} on ${neededDates[0]}. Dates available: [${available || "none"}]. Try checking the ticker on finance.yahoo.com`);
+    const available = Object.keys(priceMap).sort().slice(-5).join(", ");
+    throw new Error(`No NAV for ${symbol} on ${neededDates[0]}. Available dates: [${available || "none"}]`);
   }
 
   return { prices, source: "Yahoo Finance", note: "" };
@@ -939,12 +1011,40 @@ export default function App() {
 
   useEffect(() => {
     Promise.all([loadStorage(), loadTheme(), loadManualPicks()]).then(([stored, thm, manual]) => {
-      setPicks(stored ?? []);
+      const loadedPicks = stored ?? [];
+      setPicks(loadedPicks);
       setManual(manual ?? []);
       setIsDark(thm !== "light");
       setTimeout(() => setReady(true), 60);
+
+      // Auto-fetch prices for any pick that has no price data yet
+      const missing = loadedPicks.filter(p => !p.prices?.baseNav && !p._fetching);
+      if (missing.length > 0) {
+        setTimeout(() => autoFetchMissing(missing, loadedPicks), 800);
+      }
     });
   }, []);
+
+  // Auto-fetch prices for picks missing data — runs on load, no user action needed
+  const autoFetchMissing = async (missing, allPicks) => {
+    // Mark them as fetching
+    setPicks(prev => prev.map(p =>
+      missing.find(m => m.id === p.id) ? { ...p, _fetching: true } : p
+    ));
+    // Fetch in parallel
+    const results = await Promise.allSettled(missing.map(p => refreshPickPrices(p)));
+    setPicks(prev => {
+      const next = prev.map(p => {
+        const idx = missing.findIndex(m => m.id === p.id);
+        if (idx === -1) return p;
+        return results[idx].status === "fulfilled"
+          ? results[idx].value
+          : { ...p, _fetching: false, priceNote: results[idx].reason?.message || "Auto-fetch failed" };
+      });
+      saveStorage(next);
+      return next;
+    });
+  };
 
   const toggleTheme = () => {
     const next = !isDark;
@@ -965,7 +1065,7 @@ export default function App() {
     setSyncMsg("");
     try {
       if (!SHEET_API_URL || SHEET_API_URL === "YOUR_GOOGLE_APPS_SCRIPT_URL_HERE") {
-        setSyncMsg("⚠ No Sheet URL set — edit SHEET_API_URL in the code");
+        setSyncMsg("⚠ No Sheet URL configured");
         return;
       }
       const [sheetPicks, priceCache, manual] = await Promise.all([
@@ -973,11 +1073,15 @@ export default function App() {
       ]);
       const merged = mergePicks(sheetPicks, manual, priceCache);
       setPicks(merged);
+      // Auto-fetch prices for new sheet picks missing price data
+      const missing = merged.filter(p => !p.prices?.baseNav && !p._fetching);
+      if (missing.length > 0) setTimeout(() => autoFetchMissing(missing, merged), 500);
       setSyncMsg(`✓ Synced ${sheetPicks.length} picks from Sheet`);
-      setTimeout(() => setSyncMsg(""), 3000);
+      setTimeout(() => setSyncMsg(""), 4000);
     } catch(e) {
-      setSyncMsg(`✗ Sync failed: ${e.message}`);
-      setTimeout(() => setSyncMsg(""), 5000);
+      // Show full error so user can diagnose — stays visible 12 seconds
+      setSyncMsg(`✗ ${e.message}`);
+      setTimeout(() => setSyncMsg(""), 12000);
     } finally {
       setSyncing(false);
     }
@@ -1095,8 +1199,12 @@ export default function App() {
                 <div style={{ width:7, height:7, borderRadius:"50%", background:T.green, boxShadow:`0 0 10px ${T.green}`, animation:"blink 2s infinite" }} />
                 <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:T.green, letterSpacing:"0.18em" }}>MF PICK TRACKER</span>
                 {saved && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:T.muted }}>· ✓ saved</span>}
-                {syncMsg && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:syncMsg.startsWith("✓")?T.green:syncMsg.startsWith("⚠")?T.amber:T.red }}>{syncMsg}</span>}
               </div>
+              {syncMsg && (
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:syncMsg.startsWith("✓")?T.green:syncMsg.startsWith("⚠")?T.amber:T.red, marginBottom:6, maxWidth:600, wordBreak:"break-word", lineHeight:1.6 }}>
+                  {syncMsg}
+                </div>
+              )}
               <h1 style={{ fontFamily:"'Syne',sans-serif", fontSize:"clamp(24px,3.5vw,38px)", fontWeight:800, margin:0, letterSpacing:"-0.025em", color:T.text }}>
                 Fund <span style={{ color:T.green }}>Performance</span>
               </h1>
