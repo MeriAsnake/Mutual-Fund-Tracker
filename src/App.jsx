@@ -156,11 +156,20 @@ async function fetchSheetPicks() {
     const symbol      = String(getField(sp, "Fund Symbol", "symbol", "Symbol", "ticker", "Ticker", "SYMBOL")).toUpperCase().trim();
     const company     = String(getField(sp, "Company Name", "company", "Company", "Fund Name", "name", "Name")).trim();
     const pickedDate  = toDateStr(getField(sp, "Pick Date", "pickedDate", "Picked Date", "date", "Date", "pick_date"));
-    const expectedPct = parseFloat(String(getField(sp, "Expected %", "expectedPct", "Expected", "expected", "Target %", "target") || "0").replace("%", "")) || 0;
+    const rawExp = String(getField(sp, "Expected %", "expectedPct", "Expected", "expected", "Target %", "target") || "0").replace("%", "").trim();
+    const expNum = parseFloat(rawExp) || 0;
+    // Always store as whole number: if sheet sends 0.023 treat as 2.3%, if sends 2.3 keep as 2.3
+    const expectedPct = Math.abs(expNum) > 0 && Math.abs(expNum) < 1 ? expNum * 100 : expNum;
 
     console.log(`  Row ${i+1}: symbol="${symbol}" date="${pickedDate}" exp="${expectedPct}" company="${company}"`);
 
-    return { id: `sheet-${symbol}-${pickedDate}`, symbol, company, pickedDate, expectedPct, _source: "sheet" };
+    // If pick date falls on weekend, go BACK to previous Friday
+    // Saturday → Friday (back 1), Sunday → Friday (back 2)
+    const pdObj = new Date(pickedDate + "T12:00:00");
+    if (pdObj.getDay() === 6) pdObj.setDate(pdObj.getDate() - 1); // Sat → Fri
+    if (pdObj.getDay() === 0) pdObj.setDate(pdObj.getDate() - 2); // Sun → Fri
+    const adjustedDate = pdObj.getFullYear() + "-" + String(pdObj.getMonth()+1).padStart(2,"0") + "-" + String(pdObj.getDate()).padStart(2,"0");
+    return { id: `sheet-${symbol}-${adjustedDate}`, symbol, company, pickedDate: adjustedDate, expectedPct, _source: "sheet" };
   });
 
   const valid = picks.filter(p => {
@@ -380,10 +389,11 @@ function calcHitTarget(pick) {
   if (elapsed < 5) return null;
   const data = buildDayData(pick);
   if (data.length < 6) return null;
-  const final = data[5].cum;
-  if (pick.expectedPct > 0) return final > 0;
-  if (pick.expectedPct < 0) return final < 0;
-  return Math.abs(final) < 0.5;
+  const final = data[5].cum; // final is in % e.g. 2.5 means +2.5%
+  const target = pick.expectedPct;  // also in % e.g. 2.3 means +2.3%
+  if (target > 0) return final >= target;   // hit if actual return >= expected
+  if (target < 0) return final <= target;   // hit if actual return <= expected (negative)
+  return Math.abs(final) < 0.5;             // no target → hit if near flat
 }
 
 // ── Real Price Fetching ───────────────────────────────────────────────────────
@@ -468,20 +478,23 @@ async function fetchRealPrices(symbol, pickedDate) {
 
   const priceMap = await fetchPriceHistory(symbol, neededDates[0], neededDates[neededDates.length - 1]);
 
-  function findPrice(dateStr) {
+  // baseNav: exact date ONLY — no lookback
+  // If you pick Monday, D0 = Monday's price. Never fall back to Friday.
+  // D1-D5: allow lookback for holidays/early closes
+  function findPrice(dateStr, exactOnly = false) {
     if (priceMap[dateStr]) return priceMap[dateStr];
-    // Look back up to 3 days — mutual fund NAV often posted next morning
+    if (exactOnly) return null;
     for (let i = 1; i <= 3; i++) {
       const d = new Date(dateStr + "T12:00:00");
       d.setDate(d.getDate() - i);
-      const k = d.toISOString().slice(0, 10);
+      const k = dateToStr(d);
       if (priceMap[k]) return priceMap[k];
     }
     return null;
   }
 
   const prices = {
-    baseNav: findPrice(neededDates[0]),
+    baseNav: findPrice(neededDates[0], true), // exact — Monday stays Monday
     d1: neededDates[1] ? findPrice(neededDates[1]) : null,
     d2: neededDates[2] ? findPrice(neededDates[2]) : null,
     d3: neededDates[3] ? findPrice(neededDates[3]) : null,
@@ -491,7 +504,7 @@ async function fetchRealPrices(symbol, pickedDate) {
 
   if (prices.baseNav == null) {
     const available = Object.keys(priceMap).sort().slice(-5).join(", ");
-    throw new Error(`No NAV for ${symbol} on ${neededDates[0]}. Available dates: [${available || "none"}]`);
+    throw new Error(`No NAV for ${symbol} on ${neededDates[0]} yet — market may not have closed. Try refreshing after 4pm ET. Available: [${available || "none"}]`);
   }
 
   return { prices, source: "Yahoo Finance", note: "" };
@@ -739,7 +752,7 @@ function DetailModal({ pick, colorIdx, onClose, onRemove }) {
               <Tooltip content={<TTip />} />
               <ReferenceLine y={0} stroke={T.border} strokeDasharray="4 4" />
               <ReferenceLine y={pick.expectedPct} stroke={color} strokeDasharray="6 4" strokeOpacity={0.35}
-                label={{ value:`Target ${pick.expectedPct>0?"+":""}${pick.expectedPct}%`, position:"insideTopRight", fill:color, fontSize:9, fontFamily:"'DM Mono',monospace" }} />
+                label={{ value:`Target ${pick.expectedPct>0?"+":""}${parseFloat(pick.expectedPct.toFixed(2))}%`, position:"insideTopRight", fill:color, fontSize:9, fontFamily:"'DM Mono',monospace" }} />
               <Line type="monotone" dataKey="cum" data={visible} name={pick.symbol} stroke={color} strokeWidth={2.5} dot={{ r:3, fill:color, strokeWidth:0 }} activeDot={{ r:5 }} />
             </LineChart>
           </ResponsiveContainer>
