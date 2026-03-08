@@ -4,22 +4,22 @@ import { AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveCont
 const DARK = {
   bg:"#060A10",bgModal:"#0B111C",bgTableHead:"#080E19",
   surface:"rgba(255,255,255,0.025)",surfaceHover:"rgba(255,255,255,0.045)",
-  border:"#1A2235",muted:"#4A5568",mutedLight:"#64748B",
-  text:"#D8E4F0",textDim:"#8899AA",
+  border:"#1A2235",muted:"#7A8FA8",mutedLight:"#8A9FBA",
+  text:"#B8C8D8",textDim:"#90A8C0",
   green:"#05D48A",red:"#F05A5A",blue:"#4B9EFF",amber:"#F5A524",
   gridLine:"rgba(26,34,53,0.5)",tooltipBg:"#0B111C",
   scrollTrack:"#060A10",scrollThumb:"#1A2235",
   calIcon:"invert(0.5)",toggleBg:"#1A2235",toggleKnob:"#4A5568",isDark:true,
 };
 const LIGHT = {
-  bg:"#F0F4FA",bgModal:"#FFFFFF",bgTableHead:"#F8FAFD",
-  surface:"rgba(255,255,255,0.8)",surfaceHover:"rgba(255,255,255,1)",
-  border:"#D8E2EF",muted:"#8A9BB5",mutedLight:"#A0AEC0",
-  text:"#1A2235",textDim:"#4A5568",
-  green:"#0BBF7A",red:"#E04040",blue:"#2B7EE0",amber:"#D48C10",
-  gridLine:"rgba(216,226,239,0.6)",tooltipBg:"#FFFFFF",
-  scrollTrack:"#F0F4FA",scrollThumb:"#D8E2EF",
-  calIcon:"invert(0)",toggleBg:"#D8E2EF",toggleKnob:"#FFFFFF",isDark:false,
+  bg:"#EEF2FF",bgModal:"#FFFFFF",bgTableHead:"#E8EDFA",
+  surface:"#FFFFFF",surfaceHover:"#F4F7FF",
+  border:"#C5D0E8",muted:"#0A111E",mutedLight:"#172030",
+  text:"#060A10",textDim:"#0D1828",
+  green:"#00A86B",red:"#D92B2B",blue:"#1A5FCC",amber:"#C47A00",
+  gridLine:"rgba(165,182,220,0.35)",tooltipBg:"#FFFFFF",
+  scrollTrack:"#EEF2FF",scrollThumb:"#C5D0E8",
+  calIcon:"invert(0)",toggleBg:"#C5D0E8",toggleKnob:"#FFFFFF",isDark:false,
 };
 const ThemeCtx = createContext(DARK);
 const useT = () => useContext(ThemeCtx);
@@ -264,9 +264,17 @@ async function fetchPriceHistory(symbol,fromDate,toDate){
       const priceMap={};
       if(src.type==="json"){
         const raw=await res.json();if(raw.error)throw new Error(raw.error);
-        if(raw.dates&&raw.closes){raw.dates.forEach((d,i)=>{if(raw.closes[i])priceMap[d]=+raw.closes[i].toFixed(4);});}
-        else{const result=raw?.chart?.result?.[0];if(!result)throw new Error("No result");
-          (result.timestamp||[]).forEach((ts,i)=>{const c=result.indicators?.quote?.[0]?.close?.[i];if(c==null)return;const d=new Date((ts+5*3600)*1000);priceMap[dateToStr(d)]=+c.toFixed(4);});}
+        // Vercel proxy returns { priceMap, source }
+        if(raw.priceMap&&Object.keys(raw.priceMap).length>0){
+          Object.assign(priceMap,raw.priceMap);
+        } else if(raw.dates&&raw.closes){
+          raw.dates.forEach((d,i)=>{if(raw.closes[i])priceMap[d]=+raw.closes[i].toFixed(4);});
+        } else {
+          // Yahoo Finance chart JSON format
+          const json=raw.contents?JSON.parse(raw.contents):raw;
+          const result=json?.chart?.result?.[0];if(!result)throw new Error("No result");
+          (result.timestamp||[]).forEach((ts,i)=>{const c=result.indicators?.quote?.[0]?.close?.[i];if(c==null)return;const d=new Date((ts+5*3600)*1000);priceMap[dateToStr(d)]=+c.toFixed(4);});
+        }
       }else{
         const wrapper=await res.json();const csv=(wrapper.contents||"").trim().split("\n").slice(1);
         csv.forEach(line=>{const cols=line.split(",");const close=parseFloat(cols[4]);if(cols[0]&&!isNaN(close))priceMap[cols[0].trim()]=+close.toFixed(4);});
@@ -599,12 +607,11 @@ function TrackingTable({picks,onRowClick}){
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
         <thead><tr style={{background:T.bgTableHead,borderBottom:`1px solid ${T.border}`}}>
           <Th k="symbol" label="Ticker" w="80px"/><Th k="company" label="Company" w="150px"/>
-          <Th k="pickedDate" label="Event Date" w="100px"/>
+          <Th k="pickedDate" label="Date" w="100px"/>
           <th style={{padding:"10px 12px",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace",letterSpacing:"0.1em"}}>TARGET</th>
           <th style={{padding:"10px 12px",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace",letterSpacing:"0.1em"}}>CURRENT PRICE</th>
           <Th k="d1" label="D1" w="60px"/><Th k="d2" label="D2" w="60px"/><Th k="d3" label="D3" w="60px"/><Th k="d4" label="D4" w="60px"/><Th k="d5" label="D5" w="60px"/>
           <th style={{padding:"10px 12px",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace"}}>HIT?</th>
-          <th style={{padding:"10px 12px",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace"}}>CONF</th>
         </tr></thead>
         <tbody>{sorted.map((row)=>{
           const c=col(picks.indexOf(row.pick));
@@ -722,7 +729,7 @@ export default function StockTracker({ isDark: isDarkProp, onToggleTheme }){
       <div style={{minHeight:"100vh",background:T.bg,color:T.text,fontFamily:"'DM Sans',sans-serif",transition:"background 0.3s, color 0.3s"}}>
         <div style={{position:"fixed",inset:0,pointerEvents:"none",backgroundImage:`linear-gradient(${T.gridLine} 1px,transparent 1px),linear-gradient(90deg,${T.gridLine} 1px,transparent 1px)`,backgroundSize:"44px 44px",transition:"background-image 0.3s"}} />
         {/* ── Sticky Header Bar ── */}
-        <div style={{position:"sticky",top:0,zIndex:100,background:T.isDark?"rgba(6,10,16,0.92)":"rgba(240,244,250,0.92)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",borderBottom:`1px solid ${T.border}`,transition:"background 0.3s, border-color 0.3s"}}>
+        <div style={{position:"sticky",top:0,zIndex:100,background:T.isDark?"rgba(6,10,16,0.92)":"rgba(238,242,255,0.95)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",borderBottom:`1px solid ${T.border}`,transition:"background 0.3s, border-color 0.3s"}}>
           <div style={{maxWidth:1220,margin:"0 auto",padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:58,gap:12,flexWrap:"wrap"}}>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <div style={{display:"flex",alignItems:"center",gap:7}}>
