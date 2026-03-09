@@ -410,11 +410,16 @@ async function fetchPriceHistory(symbol, fromDate, toDate) {
     const url = `/api/prices?symbol=${encodeURIComponent(symbol)}&from=${fromDate}&to=${toDate}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
     if (res.ok) {
-      const data = await res.json();
-      if (data.priceMap && Object.keys(data.priceMap).length > 0) {
-        return data.priceMap;
+      const ct = res.headers.get("content-type") || "";
+      if (!ct.includes("application/json")) {
+        errors.push(`own-proxy: not JSON (got ${ct || "unknown content-type"})`);
+      } else {
+        const data = await res.json();
+        if (data.priceMap && Object.keys(data.priceMap).length > 0) {
+          return data.priceMap;
+        }
+        errors.push(`own-proxy: ${data.error || "empty map"}`);
       }
-      errors.push(`own-proxy: ${data.error || "empty map"}`);
     } else {
       errors.push(`own-proxy: HTTP ${res.status}`);
     }
@@ -487,7 +492,7 @@ async function fetchRealPrices(symbol, pickedDate) {
     for (let i = 1; i <= 3; i++) {
       const d = new Date(dateStr + "T12:00:00");
       d.setDate(d.getDate() - i);
-      const k = dateToStr(d);
+      const k = d.toISOString().slice(0, 10);
       if (priceMap[k]) return priceMap[k];
     }
     return null;
