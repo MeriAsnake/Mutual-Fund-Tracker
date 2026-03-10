@@ -88,12 +88,10 @@ function buildDayData(pick){
 
 function calcHitTarget(pick){
   const elapsed=tradingDaysSince(pick.pickedDate);
-  if(elapsed<1)return null; // need at least D1
+  if(elapsed<1)return null;
   const data=buildDayData(pick);
   if(data.length<2)return null;
 
-  // Resolve effective target price
-  // Priority: targetPrice → else compute from expectedPct + baseNav
   const base=pick.prices?.baseNav;
   let effectiveTarget=pick.targetPrice||null;
   if(!effectiveTarget&&pick.expectedPct&&base){
@@ -104,17 +102,26 @@ function calcHitTarget(pick){
 
   if(effectiveTarget&&base){
     const isLong=effectiveTarget>=base;
-    // Check EACH day D1-D5 — hit if ANY day reaches target
-    const days=data.slice(1); // D1 onwards
-    const hit=isLong
-      ?days.some(d=>d.price!=null&&d.price>=effectiveTarget)
-      :days.some(d=>d.price!=null&&d.price<=effectiveTarget);
+    // Check D1–D5 using intraday HIGH (bullish) or LOW (bearish)
+    // Falls back to close price if high/low not available
+    const days=data.slice(1);
+    const hit=days.some((d,i)=>{
+      const dayNum=i+1;
+      if(d.price==null)return false;
+      if(isLong){
+        // Use intraday high — if available it's more accurate than close
+        const high=pick.prices?.[`d${dayNum}High`]??d.price;
+        return high>=effectiveTarget;
+      }else{
+        const low=pick.prices?.[`d${dayNum}Low`]??d.price;
+        return low<=effectiveTarget;
+      }
+    });
     if(hit)return true;
-    // Only declare missed after D5 is complete
     return isComplete?false:null;
   }
 
-  // Fallback: % only, no base price — check each day
+  // Fallback: % only
   const target=pick.expectedPct||0;
   const days=data.slice(1);
   const hitPct=target>0
@@ -143,6 +150,23 @@ function getTargetPct(pick){
   const tp=effectiveTargetPrice(pick);
   if(tp&&base)return+((tp-base)/base*100).toFixed(2);
   return pick.expectedPct||null;
+}
+
+// ── Peak stats: highest intraday price + max % change over D1–D5 ─────────────
+function getPickPeakStats(pick){
+  const p=pick.prices;if(!p?.baseNav)return{peakPrice:null,peakPct:null,peakDay:null};
+  const base=p.baseNav;
+  let peakPrice=null,peakPct=null,peakDay=null;
+  for(let d=1;d<=5;d++){
+    const high=p[`d${d}High`];
+    const close=p[`d${d}`];
+    // Use intraday high if available, else close
+    const candidate=high??close;
+    if(candidate==null)continue;
+    const pct=+((candidate-base)/base*100).toFixed(2);
+    if(peakPct===null||pct>peakPct){peakPct=pct;peakPrice=candidate;peakDay=d;}
+  }
+  return{peakPrice,peakPct,peakDay};
 }
 
 // ── Sheet fetch ───────────────────────────────────────────────────────────────
@@ -225,29 +249,31 @@ function loadXLSX(){
 async function exportToExcel(picks){
   const XLSX=await loadXLSX();
   const wb=XLSX.utils.book_new();
-  const rows=[["Symbol","Company","Picked Date","End Date (T+5)","Target Price","Expected %","Base Price","D1 %","D2 %","D3 %","D4 %","D5 %","Hit Target?","Confidence","Source"]];
+  const rows=[["Symbol","Company","Picked Date","End Date (T+5)","Target Price","Expected %","Base Price","D1 %","D2 %","D3 %","D4 %","D5 %","Peak Price","Peak %","Peak Day","Hit Target?","Confidence","Source"]];
   const sorted=[...picks].sort((a,b)=>b.pickedDate.localeCompare(a.pickedDate));
   sorted.forEach(pick=>{
     const data=buildDayData(pick);const hit=calcHitTarget(pick);const p=pick.prices||{};
-    const tp=effectiveTargetPrice(pick);
+    const tp=effectiveTargetPrice(pick);const{peakPrice,peakPct,peakDay}=getPickPeakStats(pick);
     rows.push([
       pick.symbol,pick.company,pick.pickedDate,addTradingDays(pick.pickedDate,5),
       tp?tp:"",pick.expectedPct/100,p.baseNav||"",
       data[1]?data[1].cum/100:"",data[2]?data[2].cum/100:"",
       data[3]?data[3].cum/100:"",data[4]?data[4].cum/100:"",data[5]?data[5].cum/100:"",
+      peakPrice||"",peakPct!=null?peakPct/100:"",peakDay?`D${peakDay}`:"",
       hit===null?"Pending":hit?"YES":"NO",
       pick.confidence||"",pick.priceSource||"",
     ]);
   });
   const ws=XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"]=[{wch:10},{wch:32},{wch:13},{wch:13},{wch:13},{wch:13},{wch:10},{wch:9},{wch:9},{wch:9},{wch:9},{wch:9},{wch:13},{wch:12},{wch:16}];
-  picks.forEach((_,i)=>{const r=i+2;["F","G","H","I","J","K"].forEach(c=>{const cell=ws[c+r];if(cell&&cell.v!=="")cell.z="0.00%";});});
+  ws["!cols"]=[{wch:10},{wch:32},{wch:13},{wch:13},{wch:13},{wch:13},{wch:10},{wch:9},{wch:9},{wch:9},{wch:9},{wch:9},{wch:12},{wch:10},{wch:9},{wch:13},{wch:12},{wch:16}];
+  sorted.forEach((_,i)=>{const r=i+2;["F","G","H","I","J","K","N"].forEach(c=>{const cell=ws[c+r];if(cell&&cell.v!=="")cell.z="0.00%";});});
   XLSX.utils.book_append_sheet(wb,ws,"Stock Picks");
   XLSX.writeFile(wb,`Stock_Picks_${todayStr()}.xlsx`);
 }
 
 
 // ── Price fetch ───────────────────────────────────────────────────────────────
+// Returns { closeMap, highMap, lowMap } — all keyed by "yyyy-MM-dd"
 async function fetchPriceHistory(symbol,fromDate,toDate){
   const p1=Math.floor(new Date(fromDate+"T00:00:00Z").getTime()/1000);
   const p2=Math.floor(new Date(toDate+"T23:59:59Z").getTime()/1000);
@@ -261,26 +287,40 @@ async function fetchPriceHistory(symbol,fromDate,toDate){
     try{
       const res=await fetch(src.url,{signal:AbortSignal.timeout(12000)});
       if(!res.ok)throw new Error(`HTTP ${res.status}`);
-      const priceMap={};
+      const closeMap={},highMap={},lowMap={};
       if(src.type==="json"){
         const raw=await res.json();if(raw.error)throw new Error(raw.error);
-        // Vercel proxy returns { priceMap, source }
         if(raw.priceMap&&Object.keys(raw.priceMap).length>0){
-          Object.assign(priceMap,raw.priceMap);
+          // Vercel proxy: may return { closeMap, highMap, lowMap } or legacy { priceMap }
+          if(raw.closeMap){Object.assign(closeMap,raw.closeMap);Object.assign(highMap,raw.highMap||{});Object.assign(lowMap,raw.lowMap||{});}
+          else Object.assign(closeMap,raw.priceMap);
         } else if(raw.dates&&raw.closes){
-          raw.dates.forEach((d,i)=>{if(raw.closes[i])priceMap[d]=+raw.closes[i].toFixed(4);});
+          raw.dates.forEach((d,i)=>{if(raw.closes[i])closeMap[d]=+raw.closes[i].toFixed(4);if(raw.highs?.[i])highMap[d]=+raw.highs[i].toFixed(4);if(raw.lows?.[i])lowMap[d]=+raw.lows[i].toFixed(4);});
         } else {
-          // Yahoo Finance chart JSON format
+          // Yahoo Finance chart JSON — has full OHLC
           const json=raw.contents?JSON.parse(raw.contents):raw;
           const result=json?.chart?.result?.[0];if(!result)throw new Error("No result");
-          (result.timestamp||[]).forEach((ts,i)=>{const c=result.indicators?.quote?.[0]?.close?.[i];if(c==null)return;const d=new Date((ts+5*3600)*1000);priceMap[dateToStr(d)]=+c.toFixed(4);});
+          const quotes=result.indicators?.quote?.[0]||{};
+          (result.timestamp||[]).forEach((ts,i)=>{
+            const dateKey=dateToStr(new Date((ts+5*3600)*1000));
+            if(quotes.close?.[i]!=null)closeMap[dateKey]=+quotes.close[i].toFixed(4);
+            if(quotes.high?.[i]!=null) highMap[dateKey] =+quotes.high[i].toFixed(4);
+            if(quotes.low?.[i]!=null)  lowMap[dateKey]  =+quotes.low[i].toFixed(4);
+          });
         }
       }else{
+        // CSV: Date,Open,High,Low,Close,Adj Close,Volume
         const wrapper=await res.json();const csv=(wrapper.contents||"").trim().split("\n").slice(1);
-        csv.forEach(line=>{const cols=line.split(",");const close=parseFloat(cols[4]);if(cols[0]&&!isNaN(close))priceMap[cols[0].trim()]=+close.toFixed(4);});
+        csv.forEach(line=>{
+          const cols=line.split(",");
+          const close=parseFloat(cols[4]),high=parseFloat(cols[2]),low=parseFloat(cols[3]);
+          if(cols[0]&&!isNaN(close))closeMap[cols[0].trim()]=+close.toFixed(4);
+          if(cols[0]&&!isNaN(high)) highMap[cols[0].trim()] =+high.toFixed(4);
+          if(cols[0]&&!isNaN(low))  lowMap[cols[0].trim()]  =+low.toFixed(4);
+        });
       }
-      if(Object.keys(priceMap).length===0)throw new Error("Empty");
-      return priceMap;
+      if(Object.keys(closeMap).length===0)throw new Error("Empty");
+      return {closeMap,highMap,lowMap};
     }catch(e){errors.push(`${src.name}: ${e.message}`);}
   }
   throw new Error(`Could not fetch "${symbol}". ${errors.join(" | ")}`);
@@ -290,18 +330,35 @@ async function fetchRealPrices(symbol,pickedDate){
   const tradingDates=[pickedDate];
   for(let i=1;i<=5;i++)tradingDates.push(addTradingDays(pickedDate,i));
   const today=todayStr();const neededDates=tradingDates.filter(d=>d<=today);
-  const priceMap=await fetchPriceHistory(symbol,neededDates[0],neededDates[neededDates.length-1]);
-  function findPrice(dateStr,exactOnly=false){
-    if(priceMap[dateStr])return priceMap[dateStr];if(exactOnly)return null;
-    for(let i=1;i<=3;i++){const d=new Date(dateStr+"T12:00:00");d.setDate(d.getDate()-i);const k=dateToStr(d);if(priceMap[k])return priceMap[k];}return null;
+  const {closeMap,highMap,lowMap}=await fetchPriceHistory(symbol,neededDates[0],neededDates[neededDates.length-1]);
+
+  function findClose(dateStr,exactOnly=false){
+    if(closeMap[dateStr])return closeMap[dateStr];if(exactOnly)return null;
+    for(let i=1;i<=3;i++){const d=new Date(dateStr+"T12:00:00");d.setDate(d.getDate()-i);const k=dateToStr(d);if(closeMap[k])return closeMap[k];}return null;
   }
+  function findHigh(dateStr){return highMap[dateStr]||null;}
+  function findLow(dateStr){return lowMap[dateStr]||null;}
+
   const prices={
-    baseNav:findPrice(neededDates[0],true),
-    d1:neededDates[1]?findPrice(neededDates[1]):null,d2:neededDates[2]?findPrice(neededDates[2]):null,
-    d3:neededDates[3]?findPrice(neededDates[3]):null,d4:neededDates[4]?findPrice(neededDates[4]):null,
-    d5:neededDates[5]?findPrice(neededDates[5]):null,
+    baseNav:findClose(neededDates[0],true),
+    d1:neededDates[1]?findClose(neededDates[1]):null,
+    d2:neededDates[2]?findClose(neededDates[2]):null,
+    d3:neededDates[3]?findClose(neededDates[3]):null,
+    d4:neededDates[4]?findClose(neededDates[4]):null,
+    d5:neededDates[5]?findClose(neededDates[5]):null,
+    // Intraday highs and lows for target-hit detection
+    d1High:neededDates[1]?findHigh(neededDates[1]):null,
+    d2High:neededDates[2]?findHigh(neededDates[2]):null,
+    d3High:neededDates[3]?findHigh(neededDates[3]):null,
+    d4High:neededDates[4]?findHigh(neededDates[4]):null,
+    d5High:neededDates[5]?findHigh(neededDates[5]):null,
+    d1Low:neededDates[1]?findLow(neededDates[1]):null,
+    d2Low:neededDates[2]?findLow(neededDates[2]):null,
+    d3Low:neededDates[3]?findLow(neededDates[3]):null,
+    d4Low:neededDates[4]?findLow(neededDates[4]):null,
+    d5Low:neededDates[5]?findLow(neededDates[5]):null,
   };
-  if(prices.baseNav==null){const av=Object.keys(priceMap).sort().slice(-5).join(", ");throw new Error(`No price for ${symbol} on ${neededDates[0]}. Market may not have closed. Available: [${av||"none"}]`);}
+  if(prices.baseNav==null){const av=Object.keys(closeMap).sort().slice(-5).join(", ");throw new Error(`No price for ${symbol} on ${neededDates[0]}. Market may not have closed. Available: [${av||"none"}]`);}
   return{prices,source:"Yahoo Finance"};
 }
 async function refreshPickPrices(pick){
@@ -339,6 +396,7 @@ function DetailModal({pick,colorIdx,onClose,onRemove}){
   const isComplete=elapsed>=5;const hit=calcHitTarget(pick);
   const endDate=addTradingDays(pick.pickedDate,5);
   const targetPct=getTargetPct(pick);const hasRealPrices=!!(pick.prices?.baseNav);
+  const {peakPrice,peakPct,peakDay}=getPickPeakStats(pick);
   const SB=({label,children})=><div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:10,padding:"12px 12px"}}><div style={{fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace",letterSpacing:"0.12em",marginBottom:8}}>{label.toUpperCase()}</div>{children}</div>;
   return(
     <div onClick={e=>e.target===e.currentTarget&&onClose()} style={{position:"fixed",inset:0,background:"#00000090",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
@@ -360,7 +418,7 @@ function DetailModal({pick,colorIdx,onClose,onRemove}){
           <button onClick={onClose} style={{background:"none",border:"none",color:T.muted,cursor:"pointer",fontSize:22}}>×</button>
         </div>
         {/* Stats grid */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:10}}>
           <SB label="Picked"><span style={{fontFamily:"'DM Mono',monospace",fontSize:12,color:T.text}}>{pick.pickedDate}</span></SB>
           <SB label="End Date"><span style={{fontFamily:"'DM Mono',monospace",fontSize:12,color:isComplete?T.mutedLight:T.amber}}>{endDate}</span></SB>
           <SB label="Target Price">
@@ -368,7 +426,19 @@ function DetailModal({pick,colorIdx,onClose,onRemove}){
               ?<span style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:T.green}}>${parseFloat(tp.toFixed(2))}{!pick.targetPrice&&pick.expectedPct?<span style={{fontSize:9,color:T.muted,display:"block",marginTop:2}}>{pick.expectedPct>0?"+":""}{parseFloat(pick.expectedPct.toFixed(2))}% implied</span>:null}</span>
               :<Pct v={pick.expectedPct}/>;})()}
           </SB>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
           <SB label="Current Price">{currentPrice?<span style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:T.text}}>${currentPrice.toFixed(2)}</span>:<Pct v={current}/>}</SB>
+          <SB label={`Highest Price${peakDay?` (D${peakDay})`:""}` }>
+            {peakPrice!=null
+              ?<span style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:T.green}}>${peakPrice.toFixed(2)}</span>
+              :<span style={{color:T.muted,fontFamily:"'DM Mono',monospace",fontSize:13}}>—</span>}
+          </SB>
+          <SB label="Highest Change %">
+            {peakPct!=null
+              ?<span style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:peakPct>=0?T.green:T.red}}>{peakPct>=0?"+":""}{peakPct.toFixed(2)}%</span>
+              :<span style={{color:T.muted,fontFamily:"'DM Mono',monospace",fontSize:13}}>—</span>}
+          </SB>
         </div>
         {/* Target price breakdown */}
         {pick.prices?.baseNav&&(()=>{const tp=effectiveTargetPrice(pick);if(!tp)return null;return(
@@ -440,6 +510,7 @@ function StockCard({pick,colorIdx,onClick,onFetch}){
   const hasRealPrices=!!(pick.prices?.baseNav);
   const isFetching=pick._fetching;
   const fetchErr=!hasRealPrices&&!isFetching&&pick.priceNote;
+  const {peakPrice,peakPct,peakDay}=getPickPeakStats(pick);
   return(
     <div onClick={onClick}
       style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:14,padding:"18px",cursor:"pointer",position:"relative",overflow:"hidden",transition:"all 0.2s",boxShadow:T.isDark?"none":"0 2px 12px rgba(0,0,0,0.06)"}}
@@ -466,7 +537,7 @@ function StockCard({pick,colorIdx,onClick,onFetch}){
         <span style={{fontSize:10,fontFamily:"'DM Mono',monospace",color:isComplete?T.mutedLight:T.amber}}>{endDate}</span>
       </div>
       {/* Target + status badges */}
-      <div style={{display:"flex",gap:6,marginBottom:11,flexWrap:"wrap",alignItems:"center"}}>
+      <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap",alignItems:"center"}}>
         <span style={{fontSize:10,color:T.muted,fontFamily:"'DM Mono',monospace"}}>Target:</span>
         {(()=>{const tp=effectiveTargetPrice(pick);return tp
           ?<span style={{fontSize:10,color:T.green,fontFamily:"'DM Mono',monospace",fontWeight:700}}>${parseFloat(tp.toFixed(2))}{!pick.targetPrice&&pick.expectedPct?<span style={{fontSize:9,color:T.muted,marginLeft:3}}>(calc)</span>:null}</span>
@@ -474,6 +545,14 @@ function StockCard({pick,colorIdx,onClick,onFetch}){
         <HitBadge hit={hit}/>
         {!isComplete&&elapsed>0&&current!==null&&<Pill color={onTrack?T.green:T.red} filled>{onTrack?"On Track":"Off Track"}</Pill>}
       </div>
+      {/* Peak price row */}
+      {peakPrice!=null&&(
+        <div style={{display:"flex",gap:12,marginBottom:8,padding:"5px 8px",borderRadius:6,background:T.green+"0A",border:`1px solid ${T.green}20`,alignItems:"center"}}>
+          <span style={{fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace",letterSpacing:"0.08em"}}>PEAK{peakDay?` D${peakDay}`:""}:</span>
+          <span style={{fontSize:11,color:T.green,fontFamily:"'DM Mono',monospace",fontWeight:700}}>${peakPrice.toFixed(2)}</span>
+          <span style={{fontSize:11,color:peakPct>=0?T.green:T.red,fontFamily:"'DM Mono',monospace",fontWeight:700}}>{peakPct>=0?"+":""}{peakPct.toFixed(2)}%</span>
+        </div>
+      )}
       {/* Reasoning snippet */}
       {pick.reasoning&&<div style={{fontSize:10,color:T.textDim,marginBottom:8,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontStyle:"italic",opacity:0.8}}>"{pick.reasoning}"</div>}
       {/* Fetch prompt */}
@@ -594,10 +673,11 @@ function TrackingTable({picks,onRowClick}){
     const current=data[Math.min(elapsed,data.length-1)]?.cum??null;
     const currentPrice=data[Math.min(elapsed,data.length-1)]?.price??null;
     const hit=calcHitTarget(pick);
+    const{peakPrice,peakPct,peakDay}=getPickPeakStats(pick);
     return{pick,symbol:pick.symbol,company:pick.company,pickedDate:pick.pickedDate,
       targetPrice:pick.targetPrice,expectedPct:pick.expectedPct,current,currentPrice,hit,
       d1:data[1]?.cum??null,d2:data[2]?.cum??null,d3:data[3]?.cum??null,d4:data[4]?.cum??null,d5:data[5]?.cum??null,
-      confidence:pick.confidence};
+      peakPrice,peakPct,peakDay,confidence:pick.confidence};
   });
   const sorted=[...rows].sort((a,b)=>{const av=a[sort.key]??-999,bv=b[sort.key]??-999;return typeof av==="string"?av.localeCompare(bv)*sort.dir:(av-bv)*sort.dir;});
   const Th=({k,label,w})=><th onClick={()=>toggleSort(k)} style={{padding:"10px 12px",textAlign:"left",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace",letterSpacing:"0.1em",cursor:"pointer",whiteSpace:"nowrap",width:w,userSelect:"none"}}>{label.toUpperCase()}{arrow(k)}</th>;
@@ -611,6 +691,8 @@ function TrackingTable({picks,onRowClick}){
           <th style={{padding:"10px 12px",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace",letterSpacing:"0.1em"}}>TARGET</th>
           <th style={{padding:"10px 12px",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace",letterSpacing:"0.1em"}}>CURRENT PRICE</th>
           <Th k="d1" label="D1" w="60px"/><Th k="d2" label="D2" w="60px"/><Th k="d3" label="D3" w="60px"/><Th k="d4" label="D4" w="60px"/><Th k="d5" label="D5" w="60px"/>
+          <Th k="peakPrice" label="Peak Price" w="90px"/>
+          <Th k="peakPct" label="Peak %" w="75px"/>
           <th style={{padding:"10px 12px",fontSize:9,color:T.muted,fontFamily:"'DM Mono',monospace"}}>HIT?</th>
         </tr></thead>
         <tbody>{sorted.map((row)=>{
@@ -624,6 +706,8 @@ function TrackingTable({picks,onRowClick}){
             <td style={{padding:"10px 12px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:T.green}}>{(()=>{const tp=effectiveTargetPrice(row.pick);return tp?`$${parseFloat(tp.toFixed(2))}${!row.pick.targetPrice?" (calc)":""}`:row.expectedPct?`${row.expectedPct>0?"+":""}${parseFloat(row.expectedPct.toFixed(2))}%`:"—";})()}</td>
             <td style={{padding:"10px 12px",fontFamily:"'DM Mono',monospace",color:T.text}}>{row.currentPrice?`$${row.currentPrice.toFixed(2)}`:"—"}</td>
             <PC v={row.d1}/><PC v={row.d2}/><PC v={row.d3}/><PC v={row.d4}/><PC v={row.d5}/>
+            <td style={{padding:"10px 12px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:T.green}}>{row.peakPrice!=null?`$${row.peakPrice.toFixed(2)}${row.peakDay?` D${row.peakDay}`:""}` :"—"}</td>
+            <td style={{padding:"10px 12px",fontFamily:"'DM Mono',monospace",fontWeight:700,color:row.peakPct!=null?(row.peakPct>=0?T.green:T.red):T.muted}}>{row.peakPct!=null?`${row.peakPct>=0?"+":""}${row.peakPct.toFixed(2)}%`:"—"}</td>
             <td style={{padding:"10px 12px"}}><HitBadge hit={row.hit}/></td>
             <td style={{padding:"10px 12px"}}><ConfidenceDot level={row.confidence}/></td>
           </tr>;
