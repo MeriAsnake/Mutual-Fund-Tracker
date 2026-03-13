@@ -387,6 +387,7 @@ function getCurrentPct(pick) {
 function calcHitTarget(pick) {
   const elapsed = tradingDaysSince(pick.pickedDate);
   if (elapsed < 5) return null;
+  if (pick.prices?.d5 == null) return null;   // d5 missing = price not yet known
   const data = buildDayData(pick);
   if (data.length < 6) return null;
   const final = data[5].cum; // final is in % e.g. 2.5 means +2.5%
@@ -487,13 +488,13 @@ async function fetchRealPrices(symbol, pickedDate) {
   // If you pick Monday, D0 = Monday's price. Never fall back to Friday.
   // D1-D5: allow lookback for holidays/early closes
   function findPrice(dateStr, exactOnly = false) {
-    if (priceMap[dateStr]) return priceMap[dateStr];
+    if (priceMap[dateStr] != null) return priceMap[dateStr];
     if (exactOnly) return null;
     for (let i = 1; i <= 3; i++) {
       const d = new Date(dateStr + "T12:00:00");
       d.setDate(d.getDate() - i);
       const k = d.toISOString().slice(0, 10);
-      if (priceMap[k]) return priceMap[k];
+      if (priceMap[k] != null) return priceMap[k];
     }
     return null;
   }
@@ -504,7 +505,7 @@ async function fetchRealPrices(symbol, pickedDate) {
     d2: neededDates[2] ? findPrice(neededDates[2]) : null,
     d3: neededDates[3] ? findPrice(neededDates[3]) : null,
     d4: neededDates[4] ? findPrice(neededDates[4]) : null,
-    d5: neededDates[5] ? findPrice(neededDates[5]) : null,
+    d5: neededDates[5] ? findPrice(neededDates[5], true) : null, // exact-only: no lookback for D5 so stale D4 price never fakes a completion
   };
 
   if (prices.baseNav == null) {
@@ -714,7 +715,8 @@ function DetailModal({ pick, colorIdx, onClose, onRemove }) {
   const allData = buildDayData(pick);
   const visible = allData.slice(0, elapsed+1);
   const current = visible[visible.length-1]?.cum ?? 0;
-  const isComplete = elapsed >= 5;
+  const d5Known = pick.prices?.d5 != null;
+  const isComplete = elapsed >= 5 && d5Known;
   const hit     = calcHitTarget(pick);
   const endDate = addTradingDays(pick.pickedDate, 5);
   const hasRealPrices = !!(pick.prices?.baseNav);
@@ -806,7 +808,8 @@ function FundCard({ pick, colorIdx, onClick, onFetch }) {
   const data    = buildDayData(pick);
   const visible = data.slice(0, elapsed+1);
   const current = visible[visible.length-1]?.cum ?? null;
-  const isComplete = elapsed >= 5;
+  const d5Known = pick.prices?.d5 != null;
+  const isComplete = elapsed >= 5 && d5Known;
   const hit     = calcHitTarget(pick);
   const onTrack = current !== null && (pick.expectedPct > 0 ? current > 0 : pick.expectedPct < 0 ? current < 0 : true);
   const endDate = addTradingDays(pick.pickedDate, 5);
@@ -872,10 +875,10 @@ function FundCard({ pick, colorIdx, onClick, onFetch }) {
       </ResponsiveContainer>
       <div style={{ marginTop:10, marginBottom:8 }}>
         <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
-          <span style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{isComplete?"COMPLETED":`DAY ${elapsed} OF 5`}</span>
-          <span style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{elapsed}/5</span>
+          <span style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{isComplete?"COMPLETED":elapsed>=5?"AWAITING NAV":`DAY ${elapsed} OF 5`}</span>
+          <span style={{ fontSize:9, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{elapsed>=5&&!d5Known?"?":elapsed}/5</span>
         </div>
-        <ProgressBar value={elapsed} color={isComplete?(hit===true?T.green:hit===false?T.red:T.muted):color} />
+        <ProgressBar value={elapsed} color={isComplete?(hit===true?T.green:hit===false?T.red:T.muted):elapsed>=5?T.amber:color} />
       </div>
       <div style={{ display:"flex", gap:3 }}>
         {[1,2,3,4,5].map(d => {
@@ -921,7 +924,8 @@ function TrackingTable({ picks, onRowClick }) {
     const elapsed = tradingDaysSince(pick.pickedDate);
     const current = data[Math.min(elapsed, data.length-1)]?.cum ?? null;
     const hit = calcHitTarget(pick);
-    const isComplete = elapsed >= 5;
+    const d5Known = pick.prices?.d5 != null;
+    const isComplete = elapsed >= 5 && d5Known;
     const tradingLeft = Math.max(0, 5 - elapsed);
     return {
       pick, symbol:pick.symbol, company:pick.company,
@@ -930,7 +934,7 @@ function TrackingTable({ picks, onRowClick }) {
       d1:data[1]?.cum??null, d2:data[2]?.cum??null,
       d3:data[3]?.cum??null, d4:data[4]?.cum??null,
       d5:data[5]?.cum??null,
-      hit, status:isComplete?"Done":`Day ${Math.min(elapsed,5)}`, isComplete, elapsed, tradingLeft,
+      hit, status:isComplete?"Done":elapsed>=5?"Awaiting NAV":`Day ${Math.min(elapsed,5)}`, isComplete, elapsed, tradingLeft,
       hasRealPrices: !!(pick.prices?.baseNav),
     };
   });
@@ -958,7 +962,7 @@ function TrackingTable({ picks, onRowClick }) {
           <h3 style={{ margin:0, fontFamily:"'Syne',sans-serif", fontSize:16, fontWeight:800, color:T.text }}>All Tracked Funds</h3>
           <p style={{ margin:"3px 0 0", fontSize:11, color:T.muted }}>{picks.length} funds · click any row to view details · click column headers to sort</p>
         </div>
-        <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{picks.filter(p=>tradingDaysSince(p.pickedDate)>=5).length} completed · {picks.filter(p=>tradingDaysSince(p.pickedDate)<5).length} active</span>
+        <span style={{ fontSize:10, color:T.muted, fontFamily:"'DM Mono',monospace" }}>{picks.filter(p=>tradingDaysSince(p.pickedDate)>=5 && p.prices?.d5 != null).length} completed · {picks.filter(p=>tradingDaysSince(p.pickedDate)<5 || p.prices?.d5 == null).length} active</span>
       </div>
       <div style={{ overflowX:"auto" }}>
         <table style={{ width:"100%", borderCollapse:"collapse", minWidth:960 }}>
@@ -991,7 +995,7 @@ function TrackingTable({ picks, onRowClick }) {
                   <td style={{ padding:"13px 12px" }}>
                     <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
                       <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:row.isComplete?T.muted:T.amber }}>{fmtDate(row.endDate)}</span>
-                      <span style={{ fontSize:9, color:row.isComplete?T.muted:T.amber, fontFamily:"'DM Mono',monospace" }}>{row.isComplete?"Closed":`${row.tradingLeft} trading day${row.tradingLeft!==1?"s":""} left`}</span>
+                      <span style={{ fontSize:9, color:row.isComplete?T.muted:T.amber, fontFamily:"'DM Mono',monospace" }}>{row.isComplete?"Closed":row.elapsed>=5?"Awaiting NAV":`${row.tradingLeft} trading day${row.tradingLeft!==1?"s":""} left`}</span>
                     </div>
                   </td>
                   <td style={{ padding:"13px 12px" }}><Pct v={row.expected} size={11} /></td>
@@ -1000,7 +1004,7 @@ function TrackingTable({ picks, onRowClick }) {
                     <td key={di} style={{ padding:"13px 8px" }}><PctCell v={v} /></td>
                   ))}
                   <td style={{ padding:"13px 12px" }}><HitBadge hit={row.hit} /></td>
-                  <td style={{ padding:"13px 12px" }}><Pill color={row.isComplete?T.muted:T.blue} filled>{row.status}</Pill></td>
+                  <td style={{ padding:"13px 12px" }}><Pill color={row.isComplete?T.muted:row.elapsed>=5?T.amber:T.blue} filled>{row.status}</Pill></td>
                 </tr>
               );
             })}
@@ -1195,8 +1199,8 @@ export default function FundTracker({ isDark: isDarkProp, onToggleTheme }) {
     </ThemeCtx.Provider>
   );
 
-  const active    = picks.filter(p => tradingDaysSince(p.pickedDate) < 5);
-  const completed = picks.filter(p => tradingDaysSince(p.pickedDate) >= 5);
+  const active    = picks.filter(p => tradingDaysSince(p.pickedDate) < 5 || p.prices?.d5 == null);
+  const completed = picks.filter(p => tradingDaysSince(p.pickedDate) >= 5 && p.prices?.d5 != null);
   const hitCount  = completed.filter(p => calcHitTarget(p)===true).length;
   const hitRate   = completed.length > 0 ? Math.round((hitCount/completed.length)*100) : null;
   const sortNewest = arr => [...arr].sort((a,b) => b.pickedDate.localeCompare(a.pickedDate));
