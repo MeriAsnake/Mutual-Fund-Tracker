@@ -33,7 +33,7 @@ export default function TrackerSelector({ active, onChange, isDark, onToggleThem
             display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14,
           }}>⚡</div>
           <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: logoText, letterSpacing: "0.14em" }}>
-            PICK TRACKER
+            UPONLI PICK TRACKER
           </span>
         </div>
 
