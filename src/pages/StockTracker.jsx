@@ -64,9 +64,10 @@ function isMarketHoliday(s){const y=parseInt(s.slice(0,4));if(!_hCache[y])_hCach
 function isMarketOpen(s){const d=new Date(s+"T12:00:00");if(d.getDay()===0||d.getDay()===6)return false;return!isMarketHoliday(s);}
 function addTradingDays(dateStr,n){const d=new Date(dateStr+"T12:00:00");let c=0;while(c<n){d.setDate(d.getDate()+1);if(isMarketOpen(dateToStr(d)))c++;}return dateToStr(d);}
 function tradingDaysSince(dateStr){
-  const start=new Date(dateStr+"T12:00:00");const today=new Date();today.setHours(12,0,0,0);
+  const start=new Date(dateStr+"T12:00:00");const today=new Date();today.setHours(0,0,0,0);
   if(today<=start)return 0;let count=0;const cur=new Date(start);
-  while(true){cur.setDate(cur.getDate()+1);if(cur>today)break;if(isMarketOpen(dateToStr(cur)))count++;if(count>=5)break;}
+  // Use >= so today itself is never counted — only strictly past trading days
+  while(true){cur.setDate(cur.getDate()+1);const curDay=new Date(cur);curDay.setHours(0,0,0,0);if(curDay>=today)break;if(isMarketOpen(dateToStr(cur)))count++;if(count>=5)break;}
   return count;
 }
 function getTradingDayDates(dateStr){const result=[];let cur=dateStr;for(let i=1;i<=5;i++){cur=addTradingDays(cur,1);result.push({tradingDay:i,date:cur});}return result;}
@@ -329,7 +330,7 @@ async function fetchPriceHistory(symbol,fromDate,toDate){
 async function fetchRealPrices(symbol,pickedDate){
   const tradingDates=[pickedDate];
   for(let i=1;i<=5;i++)tradingDates.push(addTradingDays(pickedDate,i));
-  const today=todayStr();const neededDates=tradingDates.filter(d=>d<=today);
+  const today=todayStr();const neededDates=tradingDates.filter(d=>d<today); // exclude today — market has not closed yet
   const {closeMap,highMap,lowMap}=await fetchPriceHistory(symbol,neededDates[0],neededDates[neededDates.length-1]);
 
   function findClose(dateStr,exactOnly=false){
