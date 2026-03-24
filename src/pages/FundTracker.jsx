@@ -933,7 +933,7 @@ function TrackingTable({ picks, onRowClick }) {
       expected:pick.expectedPct, current,
       d1:data[1]?.cum??null, d2:data[2]?.cum??null,
       d3:data[3]?.cum??null, d4:data[4]?.cum??null,
-      d5:data[5]?.cum??null,
+      d5:data[5]?.daily??null,
       hit, status:isComplete?"Done":elapsed>=5?"Awaiting NAV":`Day ${Math.min(elapsed,5)}`, isComplete, elapsed, tradingLeft,
       hasRealPrices: !!(pick.prices?.baseNav),
     };
